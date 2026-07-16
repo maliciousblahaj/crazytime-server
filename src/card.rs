@@ -1,10 +1,11 @@
 use rand::seq::SliceRandom;
+use serde::{Deserialize, Serialize};
 
-pub struct CardManager {
+pub struct CardPool {
     pub card_pool: Vec<Card>,
 }
 
-impl CardManager {
+impl CardPool {
     /// with fixed card pool
     pub fn new() -> Self {
         let mut card_pool = vec![
@@ -268,7 +269,7 @@ impl CardManager {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Serialize, Deserialize)]
 pub struct Card {
     pub clock: ClockType,
     pub time: Time,
@@ -293,7 +294,19 @@ impl Card {
     }
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+pub enum ClockType {
+    Sun,
+    Hourglass,
+    Chinese,
+    Yellow,
+    Purple,
+    Watch,
+    Atomic,
+    TimeMachine,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Time {
     One,
     OneThirty,
@@ -397,14 +410,47 @@ impl Time {
     }
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
-pub enum ClockType {
-    Sun,
-    Hourglass,
-    Chinese,
-    Yellow,
-    Purple,
-    Watch,
-    Atomic,
-    TimeMachine,
+/// The "valid" input times a player can count
+#[derive(Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+pub enum InputTime {
+    Zero,
+    ZeroThirty,
+    One,
+    OneThirty,
+    Two,
+    TwoThirty,
+    Three,
+    ThreeThirty,
+    Four,
+    FourThirty,
+    Five,
+    FiveThirty,
+    Six,
+    SixThirty,
+    Seven,
+    SevenThirty,
+    Eight,
+    EightThirty,
+    Nine,
+    NineThirty,
+    Ten,
+    TenThirty,
+    Eleven,
+    ElevenThirty,
+    Twelve,
+    TwelveThirty,
+    Thirteen,
+    ThirteenThirty,
+    Fourteen,
+    FourteenThirty,
+    Fifteen,
+    FifteenThirty,
+    Sixteen,
+    SixteenThirty,
+    Seventeen,
+    SeventeenThirty,
+    Eighteen,
+    EighteenThirty,
+    Nineteen,
+    NineteenThirty,
 }

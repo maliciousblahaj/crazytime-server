@@ -1,44 +1,56 @@
-use std::net::{IpAddr, SocketAddr};
-
 use axum::{
     Json, Router,
-    extract::{State, WebSocketUpgrade},
+    extract::{
+        State, WebSocketUpgrade,
+        ws::{self, Message},
+    },
     response::IntoResponse,
     routing::post,
 };
 use crazytime_server::{
-    lobby::{Lobby, LobbyCode},
-    player::PlayerId,
+    ErrorMessage, ServerMessage, SessionId,
+    lobby::{Lobby, LobbyCode, LobbyMessage},
+    player::SessionId,
 };
-use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-
-// TODO: this is how we do the backend:
-// first of all you send a normal http request to a join lobby endpoint, or a host endpoint.
-// If it errors it will return the error but if it suceeds it will upgrade it to a websocket
-// connection, and start talking in messages. It will also send an init message, which contains
-// a ton of relevant data, like your assigned player id which you'll save in localstorage,
-// and more. If you're the host you can send certain ws requests which youd playerid will authenticate.
-
-// btw i will also make a websocket request which fetches all data for syncing and making sure the
-// frontend is at the same state as the backend. obviously it will be, but this is just for testing
-// purposes, and since the frontend is vibecoded we must know instantly if it gets something wrong
+use std::{
+    collections::HashMap,
+    net::{IpAddr, SocketAddr},
+    sync::Arc,
+};
+use tokio::{
+    select,
+    sync::{
+        Mutex,
+        mpsc::{self, Sender, UnboundedSender, error::SendError},
+    },
+    task::JoinHandle,
+    time::sleep,
+};
 
 #[derive(Clone)]
-pub struct AppState {
-    active_lobbies: DashMap<LobbyCode, Lobby>,
+struct AppState {
+    active_lobbies: HashMap<LobbyCode, ActiveLobbyHandle>,
+    session_lobby_index: HashMap<SessionId, LobbyCode>,
 }
 
 impl AppState {
-    pub fn new() -> Self {
+    fn new() -> Self {
         Self {
             active_lobbies: DashMap::new(),
+            session_lobby_index: HashMap::new(),
         }
     }
 
-    pub fn host_lobby(&mut self, player_id: PlayerId) -> LobbyCode {
-        // TODO check if player already inside a lobby, if so don't let them host
+    /// host a lobby. returns its lobbycode if succeeded
+    ///
+    /// returns Err(code) if you're already in a lobby with a certain code
+    async fn host_lobby(&mut self, session_id: SessionId) -> Result<LobbyCode, LobbyCode> {
+        if let Some(lobby_code) = self.session_lobby_index.get(&session_id) {
+            return Err(lobby_code);
+        }
 
+        // generate new lobby code without collisions
         let lobby_code = loop {
             let code = LobbyCode::new();
             if !self.active_lobbies.contains_key(&code) {
@@ -46,31 +58,81 @@ impl AppState {
             }
         };
 
-        let lobby = Lobby::new(lobby_code, player_id);
-        self.active_lobbies.insert(lobby_code, lobby);
+        let lobby = Lobby::new(lobby_code, session_id);
+        self.active_lobbies.insert(lobby.lobby_code, lobby);
+        self.session_lobby_index
+            .insert(session_id, lobby.lobby_code);
         lobby_code
     }
-    pub fn join_lobby(
+
+    async fn handle_message(
         &mut self,
-        player_id: PlayerId,
-        lobby_code: LobbyCode,
-    ) -> Result<(), JoinLobbyError> {
-        // TODO: check if player already inside a lobby, if so don't let them join
-        let mut lobby = self
-            .active_lobbies
-            .get_mut(&lobby_code)
-            .ok_or(JoinLobbyError::LobbyDoesNotExist)?;
-        *lobby.add
+        session_id: SessionId,
+        message: SessionMessage,
+        tx: UnboundedSender<ServerMessage>,
+    ) -> Result<(), SendError<ServerMessage>> {
+        // TODOOOOOOO
+        match message {
+            SessionMessage::JoinLobby(lobby_code) => {
+                if let Some(lobby) = self.session_lobby_index.get(&session_id) {
+                    tx.send(ServerMessage::Error(ErrorMessage::AlreadyInLobby))
+                        .await?;
+                    return;
+                }
+                let Some(handle) = self.active_lobbies.get(&lobby_code) else {
+                    tx.send(ServerMessage::Error(ErrorMessage::LobbyDoesNotExist))
+                        .await?;
+                    return;
+                };
+            }
+            SessionMessage::HostLobby => todo!(),
+            SessionMessage::LobbyMessage(lobby_message) => {
+                let Some(lobby_code) = self.session_lobby_index.get(&session_id) else {
+                    tx.send(ServerMessage::Error(ErrorMessage::NotInLobby))
+                        .await?;
+                    return;
+                };
+                if let Err(e) = self.send_lobby_message(session_id, lobby_message, tx) {
+                    match e {
+                        SendLobbyMessageError::LobbyDoesNotExist => {
+                            tx.send(ServerMessage::Error(ErrorMessage::LobbyDoesNotExist))
+                                .await?;
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+    // async fn get_lobby_sender(
+    //     &mut self,
+    //     session_id: SessionId,
+    // ) -> Option<UnboundedSender<LobbyMessage>> {
+    //     if let
+    // }
+
+    async fn alert_lobby_of_disconnect(&mut self, session_id: SessionId) {
+        todo!()
+    }
+    async fn connection_added(
+        &mut self,
+        session_id: SessionId,
+        tx: UnboundedSender<ServerMessage>,
+    ) {
+        todo!()
     }
 }
-pub enum JoinLobbyError {
+
+struct ActiveLobbyHandle {
+    handle: JoinHandle<()>,
+    sender: UnboundedSender<LobbyMessage>,
+}
+
+enum JoinLobbyError {
     LobbyDoesNotExist,
     LobbyIsFull,
-}
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct JoinLobbyForm {
-    lobby_code: LobbyCode,
+    AlreadyInLobby(LobbyCode),
 }
 
 #[tokio::main]
@@ -80,7 +142,8 @@ async fn main() -> color_eyre::Result<()> {
     let state = AppState::new();
 
     let app = Router::new()
-        .route("/game", get(ws_endpoint))
+        .route("/api", get(ws_endpoint))
+        .route("/get_token", get(get_token_endpoint))
         .with_state(state);
 
     let port: u16 = std::env::var("CRAZYTIME_PORT")
@@ -95,16 +158,95 @@ async fn main() -> color_eyre::Result<()> {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct WsAuthForm {
-    player_id: PlayerId,
+struct WsAuthForm {
+    player_id: SessionId,
 }
 
-pub fn ws_endpoint(
-    State(app): State<AppState>,
+async fn get_token_endpoint() -> impl IntoResponse {
+    SessionId::new().to_string()
+}
+
+async fn ws_endpoint(
+    State(app_state): State<AppState>,
     Json(input): Json<WsAuthForm>,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| async move {
-        transport::run_connection(socket, input.player_id).await;
+    ws.on_upgrade(async move |mut socket| {
+        let session_id = input.player_id;
+        let (tx, rx) = mpsc::unbounded_channel();
+
+        let idle_duration = Duration::from_secs(20);
+        let pong_wait_duration = Duration::from_secs(10);
+        let idle_timer = sleep(idle_duration);
+        tokio::pin!(idle_timer);
+        let mut pong_wait_timer: Option<Pin<Box<Sleep>>> = None;
+
+        // so it can receive appropriate welcome messages
+        app_state.connection_added(session_id, tx.clone()).await;
+        loop {
+            select! {
+                // this polls the idle timer, and if it's ready (finished sleeping), this will run
+                _ = &mut idle_timer, if pong_wait_timer.is_none() => {
+                    socket.send(ws::Message::Ping(())).await.inspect_err(|e| tracing::error!(error = %e, "ping send failed"));
+                    pong_wait_timer = Some(Box::pin(sleep(pong_wait_duration)));
+                },
+                // async block is needed becuase select! expects a future, and this is an Option<impl Future>
+                _ = async { pong_wait_timer.as_mut().unwrap().await }, if pong_wait_timer.is_some() => {
+                    tracing::warn!(?session_id, "pong timeout, disconnecting");
+                    break;
+                },
+                ws_message = socket.recv() => {
+                    idle_timer.as_mut().reset(Instant::now() + idle_duration);
+                    match ws_message {
+                        Some(Ok(ws::Message::Text(text))) => {
+                            let Ok(message) = serde_json::from_str::<SessionMessage>(text) else {
+                                tx.send(ServerMessage::Error(ErrorMessage::InvalidClientMessage)).inspect_err(|e| tracing::error!(error = %e));
+                                continue;
+                            };
+                            app_state.handle_message(session_id, message, tx.clone()).await.inspect_err(|e| tracing::error!(error = %e));
+                        },
+                        Some(Ok(ws::Message::Ping(_))) => {
+                            socket.send(ws::Message::Pong(())).await.inspect_err(|e| tracing::error!(error = %e));
+                        }
+                        Some(Ok(ws::Message::Pong(_))) => {
+                            pong_wait_timer = None;
+                        }
+                        Some(Ok(ws::Message::Close(_))) | None => {
+                            // the connection closed. user might later reconnect by starting a new connection, in which the
+                            // AppState::connection_added method has them covered to recover the session
+                            //
+                            // btw message the lobby in some way so it can know to start a wait timer before it disconnects the player
+                            app_state.alert_lobby_of_disconnect(session_id).await.inspect_err(|e| tracing::error!(error = %e));
+                            break;
+                        }
+                        Some(_) => {
+                            tx.send(ServerMessage::Error(ErrorMessage::InvalidClientMessage)).inspect_err(|e| tracing::error!(error = %e));
+                        }
+                    }
+                },
+                server_message = rx.recv() => {
+                    match server_message{
+                        Some(ServerMessage::Ping) => {
+                            socket.send(ws::Message::Ping(())).await.inspect_err(|e| tracing::error!(error = %e));
+                        }
+                        Some(message) => {
+                            let json = serde_json::to_string(&message).unwrap();
+                            socket.send(ws::Message::Text(json)).await.inspect_err(|e| tracing::error!(error = %e));
+                        },
+                        None => {
+                            println!("impossible!");
+                        },
+                    }
+                }
+            }
+        }
     })
+}
+
+#[serde(rename_all = "camelCase")]
+#[derive(Deserialize)]
+pub enum SessionMessage {
+    JoinLobby(LobbyCode),
+    HostLobby,
+    LobbyMessage(LobbyMessage),
 }

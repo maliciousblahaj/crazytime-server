@@ -1,12 +1,15 @@
-use rand::seq::SliceRandom;
-
 use crate::{
     card::{ClockType, Time},
-    game::{AdaptiveRoundState, HitType, PublicGameState, TurnDirection},
+    game::{
+        r#match::MatchState,
+        round::{HitType, MutableRoundState, TurnDirection},
+    },
 };
+use rand::seq::SliceRandom;
+use serde::{Deserialize, Serialize};
 
-pub type CriteriaFn = Box<dyn Fn(&PublicGameState) -> bool>;
-pub type RuleFn = Box<dyn Fn(&mut AdaptiveRoundState, &PublicGameState)>;
+pub type CriteriaFn = Box<dyn Fn(&MatchState) -> bool>;
+pub type RuleFn = Box<dyn Fn(&mut MutableRoundState, &MatchState)>;
 
 pub struct Criteria {
     description: Description,
@@ -17,7 +20,14 @@ pub struct Rule {
     handler: RuleFn,
 }
 
+#[derive(Serialize)]
+pub struct ActiveRuleInfo {
+    rule: Description,
+    criteria: Description,
+}
+
 // potential future support of multiple languages
+#[derive(Serialize, Deserialize)]
 pub struct Description {
     english: String,
 }
@@ -45,13 +55,13 @@ impl RuleManager {
                     description: Description::new(
                         "When the current player says the same time as the card they revealed",
                     ),
-                    handler: Box::new(|round_context: &PublicGameState| {
+                    handler: Box::new(|round_context: &MatchState| {
                         round_context.current_move.card.time == round_context.current_move.count
                     }),
                 },
                 Rule {
                     description: Description::new("Everyone hits in the middle with one hand"),
-                    handler: Box::new(|round_state: &mut AdaptiveRoundState, _| {
+                    handler: Box::new(|round_state: &mut MutableRoundState, _| {
                         round_state.everyone_should_hit = Some(HitType::Single);
                     }),
                 },
@@ -59,13 +69,13 @@ impl RuleManager {
             (
                 Criteria {
                     description: Description::new("todo"),
-                    handler: Box::new(|round_context: &PublicGameState| {
+                    handler: Box::new(|round_context: &MatchState| {
                         round_context.current_move.card.clock == ClockType::TimeMachine
                     }),
                 },
                 Rule {
                     description: Description::new("todo"),
-                    handler: Box::new(|round_state: &mut AdaptiveRoundState, _| {
+                    handler: Box::new(|round_state: &mut MutableRoundState, _| {
                         round_state.direction.toggle();
                     }),
                 },
@@ -74,103 +84,103 @@ impl RuleManager {
         let mut criteria_pool: Vec<Criteria> = vec![
             Criteria {
                 description: Description::new("todo"),
-                handler: Box::new(|round_context: &PublicGameState| {
+                handler: Box::new(|round_context: &MatchState| {
                     round_context.current_move.card.clock == ClockType::Atomic
                 }),
             },
             Criteria {
                 description: Description::new("todo"),
-                handler: Box::new(|round_context: &PublicGameState| {
+                handler: Box::new(|round_context: &MatchState| {
                     round_context.current_move.card.clock == ClockType::Watch
                 }),
             },
             Criteria {
                 description: Description::new("todo"),
-                handler: Box::new(|round_context: &PublicGameState| {
+                handler: Box::new(|round_context: &MatchState| {
                     round_context.current_move.card.clock == ClockType::Hourglass
                 }),
             },
             Criteria {
                 description: Description::new("todo"),
-                handler: Box::new(|round_context: &PublicGameState| {
+                handler: Box::new(|round_context: &MatchState| {
                     round_context.current_move.card.clock == ClockType::Sun
                 }),
             },
             Criteria {
                 description: Description::new("todo"),
-                handler: Box::new(|round_context: &PublicGameState| {
+                handler: Box::new(|round_context: &MatchState| {
                     round_context.current_move.card.clock == ClockType::Chinese
                 }),
             },
             Criteria {
                 description: Description::new("todo"),
-                handler: Box::new(|round_context: &PublicGameState| {
+                handler: Box::new(|round_context: &MatchState| {
                     round_context.current_move.card.clock == ClockType::Yellow
                 }),
             },
             Criteria {
                 description: Description::new("todo"),
-                handler: Box::new(|round_context: &PublicGameState| {
+                handler: Box::new(|round_context: &MatchState| {
                     round_context.current_move.card.clock == ClockType::Purple
                 }),
             },
             Criteria {
                 description: Description::new("todo"),
-                handler: Box::new(|round_context: &PublicGameState| {
+                handler: Box::new(|round_context: &MatchState| {
                     round_context.current_move.card.clock == ClockType::Purple
                 }),
             },
             Criteria {
                 description: Description::new("todo"),
-                handler: Box::new(|round_context: &PublicGameState| {
+                handler: Box::new(|round_context: &MatchState| {
                     round_context.current_move.card.time == Time::One
                 }),
             },
             Criteria {
                 description: Description::new("todo"),
-                handler: Box::new(|round_context: &PublicGameState| {
+                handler: Box::new(|round_context: &MatchState| {
                     round_context.current_move.card.time == Time::Two
                 }),
             },
             Criteria {
                 description: Description::new("todo"),
-                handler: Box::new(|round_context: &PublicGameState| {
+                handler: Box::new(|round_context: &MatchState| {
                     round_context.current_move.card.time == Time::Four
                 }),
             },
             Criteria {
                 description: Description::new("todo"),
-                handler: Box::new(|round_context: &PublicGameState| {
+                handler: Box::new(|round_context: &MatchState| {
                     round_context.current_move.card.time == Time::Five
                 }),
             },
             Criteria {
                 description: Description::new("todo"),
-                handler: Box::new(|round_context: &PublicGameState| {
+                handler: Box::new(|round_context: &MatchState| {
                     round_context.current_move.card.time == Time::Seven
                 }),
             },
             Criteria {
                 description: Description::new("todo"),
-                handler: Box::new(|round_context: &PublicGameState| {
+                handler: Box::new(|round_context: &MatchState| {
                     round_context.current_move.card.time == Time::Eleven
                 }),
             },
             Criteria {
                 description: Description::new("todo"),
-                handler: Box::new(|round_context: &PublicGameState| {
+                handler: Box::new(|round_context: &MatchState| {
                     round_context.current_move.card.time == Time::Twelve
                 }),
             },
             Criteria {
                 description: Description::new("todo"),
-                handler: Box::new(|round_context: &PublicGameState| {
+                handler: Box::new(|round_context: &MatchState| {
                     round_context.current_move.card.time.is_thirty()
                 }),
             },
             Criteria {
                 description: Description::new("todo"),
-                handler: Box::new(|round_context: &PublicGameState| {
+                handler: Box::new(|round_context: &MatchState| {
                     round_context
                         .previously_played_card
                         .as_ref()
@@ -181,13 +191,13 @@ impl RuleManager {
             },
             Criteria {
                 description: Description::new("todo"),
-                handler: Box::new(|round_context: &PublicGameState| {
+                handler: Box::new(|round_context: &MatchState| {
                     round_context.current_move.card.is_right_angle()
                 }),
             },
             Criteria {
                 description: Description::new("todo"),
-                handler: Box::new(|round_context: &PublicGameState| {
+                handler: Box::new(|round_context: &MatchState| {
                     round_context
                         .previously_played_card
                         .as_ref()
@@ -200,14 +210,14 @@ impl RuleManager {
         let mut rule_pool: Vec<Rule> = vec![
             Rule {
                 description: Description::new("next player counts 1"),
-                handler: Box::new(|round_state: &mut AdaptiveRoundState, _| {
+                handler: Box::new(|round_state: &mut MutableRoundState, _| {
                     round_state.next_count = Time::One;
                 }),
             },
             Rule {
                 description: Description::new("next player is skipped"),
                 handler: Box::new(
-                    |round_state: &mut AdaptiveRoundState, round_context: &PublicGameState| {
+                    |round_state: &mut MutableRoundState, round_context: &MatchState| {
                         round_state.next_player_index = match round_state.direction {
                             TurnDirection::Forward => {
                                 (round_context.current_player_index + 2) % round_context.n_players
@@ -225,7 +235,7 @@ impl RuleManager {
                     "next player counts the same as the current player just did",
                 ),
                 handler: Box::new(
-                    |round_state: &mut AdaptiveRoundState, round_context: &PublicGameState| {
+                    |round_state: &mut MutableRoundState, round_context: &MatchState| {
                         round_state.next_count = round_context.current_move.count;
                     },
                 ),
@@ -236,20 +246,20 @@ impl RuleManager {
                     "next player says the time that was on the card the current player played",
                 ),
                 handler: Box::new(
-                    |round_state: &mut AdaptiveRoundState, round_context: &PublicGameState| {
+                    |round_state: &mut MutableRoundState, round_context: &MatchState| {
                         round_state.next_count = round_context.current_move.card.time;
                     },
                 ),
             },
             Rule {
                 description: Description::new("next player says the name of this rule"),
-                handler: Box::new(|round_state: &mut AdaptiveRoundState, _| {
+                handler: Box::new(|round_state: &mut MutableRoundState, _| {
                     round_state.should_say_the_name_of_this_rule = true;
                 }),
             },
             Rule {
                 description: Description::new("next player says the name of this rule"),
-                handler: Box::new(|round_state: &mut AdaptiveRoundState, _| {
+                handler: Box::new(|round_state: &mut MutableRoundState, _| {
                     round_state.should_say_the_name_of_this_rule = true;
                 }),
             },
@@ -259,7 +269,7 @@ impl RuleManager {
                     "next player says the time that was on the card the current player played",
                 ),
                 handler: Box::new(
-                    |round_state: &mut AdaptiveRoundState, round_context: &PublicGameState| {
+                    |round_state: &mut MutableRoundState, round_context: &MatchState| {
                         round_state.next_count = round_context.current_move.card.time;
                     },
                 ),
@@ -267,14 +277,14 @@ impl RuleManager {
             Rule {
                 description: Description::new("the current player plays again"),
                 handler: Box::new(
-                    |round_state: &mut AdaptiveRoundState, round_context: &PublicGameState| {
+                    |round_state: &mut MutableRoundState, round_context: &MatchState| {
                         round_state.next_player_index = round_context.current_player_index;
                     },
                 ),
             },
             Rule {
                 description: Description::new("the next player doesn't play a card"),
-                handler: Box::new(|round_state: &mut AdaptiveRoundState, _| {
+                handler: Box::new(|round_state: &mut MutableRoundState, _| {
                     round_state.should_lay_no_card = true;
                 }),
             },
@@ -282,7 +292,7 @@ impl RuleManager {
                 description: Description::new(
                     "the next player says what they should've said but plus 30 minutes",
                 ),
-                handler: Box::new(|round_state: &mut AdaptiveRoundState, _| {
+                handler: Box::new(|round_state: &mut MutableRoundState, _| {
                     round_state.next_count =
                         Time::ALL[(round_state.next_count.get_index() + 1) % 24];
                 }),
@@ -292,7 +302,7 @@ impl RuleManager {
                     "the next player says what the current player said minus 3 hours",
                 ),
                 handler: Box::new(
-                    |round_state: &mut AdaptiveRoundState, round_context: &PublicGameState| {
+                    |round_state: &mut MutableRoundState, round_context: &MatchState| {
                         round_state.next_count =
                             Time::ALL[(24 + round_context.current_move.count.get_index() - 6) % 24];
                     },
@@ -303,7 +313,7 @@ impl RuleManager {
                     "the next player says what the current player said plus 2 hours",
                 ),
                 handler: Box::new(
-                    |round_state: &mut AdaptiveRoundState, round_context: &PublicGameState| {
+                    |round_state: &mut MutableRoundState, round_context: &MatchState| {
                         round_state.next_count =
                             Time::ALL[(round_context.current_move.count.get_index() + 4) % 24];
                     },
@@ -311,13 +321,13 @@ impl RuleManager {
             },
             Rule {
                 description: Description::new("the player direction is reversed"),
-                handler: Box::new(|round_state: &mut AdaptiveRoundState, _| {
+                handler: Box::new(|round_state: &mut MutableRoundState, _| {
                     round_state.direction.toggle();
                 }),
             },
             Rule {
                 description: Description::new("the count interval should now be 2 hours at a time"),
-                handler: Box::new(|round_state: &mut AdaptiveRoundState, _| {
+                handler: Box::new(|round_state: &mut MutableRoundState, _| {
                     round_state.count_interval_index = 4;
                 }),
             },
@@ -325,7 +335,7 @@ impl RuleManager {
                 description: Description::new(
                     "the count interval should now be 30 minutes at a time",
                 ),
-                handler: Box::new(|round_state: &mut AdaptiveRoundState, _| {
+                handler: Box::new(|round_state: &mut MutableRoundState, _| {
                     round_state.count_interval_index = 1;
                 }),
             },
@@ -333,17 +343,17 @@ impl RuleManager {
             //     description: Description::new(
             //         "everyone should count in another language or dialect",
             //     ),
-            //     handler: Box::new(|round_state: &mut AdaptiveRoundState, _| {}),
+            //     handler: Box::new(|round_state: &mut MutableRoundState, _| {}),
             // },
             Rule {
                 description: Description::new("everyone should hit in the middle with both hands"),
-                handler: Box::new(|round_state: &mut AdaptiveRoundState, _| {
+                handler: Box::new(|round_state: &mut MutableRoundState, _| {
                     round_state.everyone_should_hit = Some(HitType::Double);
                 }),
             },
             Rule {
                 description: Description::new("everyone should hit in the middle with the palm up"),
-                handler: Box::new(|round_state: &mut AdaptiveRoundState, _| {
+                handler: Box::new(|round_state: &mut MutableRoundState, _| {
                     round_state.everyone_should_hit = Some(HitType::UpsideDown);
                 }),
             },
@@ -351,19 +361,19 @@ impl RuleManager {
             //     description: Description::new(
             //         "the winner of the previous round should do the next move",
             //     ),
-            //     handler: Box::new(|round_state: &mut AdaptiveRoundState, _| {}),
+            //     handler: Box::new(|round_state: &mut MutableRoundState, _| {}),
             // },
             // Rule {
             //     description: Description::new(
             //         "the player with the highest time card in their card pile should do the next move",
             //     ),
-            //     handler: Box::new(|round_state: &mut AdaptiveRoundState, _| {}),
+            //     handler: Box::new(|round_state: &mut MutableRoundState, _| {}),
             // },
             Rule {
                 description: Description::new(
                     "the next player should say anything but their supposed time",
                 ),
-                handler: Box::new(|round_state: &mut AdaptiveRoundState, _| {
+                handler: Box::new(|round_state: &mut MutableRoundState, _| {
                     round_state.should_say_anything_but_correct_count = true;
                 }),
             },
@@ -371,13 +381,13 @@ impl RuleManager {
             //     description: Description::new(
             //         "the players left and right of the current player must hit in the middle",
             //     ),
-            //     handler: Box::new(|round_state: &mut AdaptiveRoundState, _| {}),
+            //     handler: Box::new(|round_state: &mut MutableRoundState, _| {}),
             // },
             Rule {
                 description: Description::new(
                     "from now on all players should say anything but their supposed time",
                 ),
-                handler: Box::new(|round_state: &mut AdaptiveRoundState, _| {
+                handler: Box::new(|round_state: &mut MutableRoundState, _| {
                     round_state.everyone_should_say_anything_but_correct_count = true;
                 }),
             },
@@ -385,13 +395,13 @@ impl RuleManager {
             //     description: Description::new(
             //         "the players left and right of the current player must hit in the middle",
             //     ),
-            //     handler: Box::new(|round_state: &mut AdaptiveRoundState, _| {}),
+            //     handler: Box::new(|round_state: &mut MutableRoundState, _| {}),
             // },
             // Rule {
             //     description: Description::new(
             //         "all players with even numbers on their card stack should hit in the middle",
             //     ),
-            //     handler: Box::new(|round_state: &mut AdaptiveRoundState, _| {}),
+            //     handler: Box::new(|round_state: &mut MutableRoundState, _| {}),
             // },
         ];
 
@@ -407,7 +417,7 @@ impl RuleManager {
     }
 
     /// run all rules
-    pub fn run_rules(&self, round_context: &PublicGameState, round_state: &mut AdaptiveRoundState) {
+    pub fn run_rules(&self, round_context: &MatchState, round_state: &mut MutableRoundState) {
         let mut rule_to_run = None;
         for (criteria, rule) in self
             .active_rules
