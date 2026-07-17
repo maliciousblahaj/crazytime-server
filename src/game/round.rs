@@ -5,11 +5,14 @@ use crate::{
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, sync::mpsc::SendError};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::mpsc::SendError,
+};
 use tokio::sync::mpsc::UnboundedSender;
 
 pub struct RoundState {
-    pub init_state: InitRoundState,
+    pub init_round_state: InitRoundState,
 
     /// every move/hit that is made is pushed onto this stack
     pub player_actions: Vec<PlayerAction>,
@@ -17,11 +20,99 @@ pub struct RoundState {
     /// the cards each player has revealed this round
     pub public_card_stacks: HashMap<PlayerId, Vec<Card>>,
 
-    /// NOT the same as public player id, but just the index in the players array
-    pub current_player_index: usize,
-
     /// the index of player_actions when it occured, and the reason
     pub error_occured: Option<(usize, PlayerLostReason)>,
+
+    /// if this is empty, direction will determine the next player instead
+    pub next_players: Vec<PlayerId>,
+    /// if this is empty, default is count and lay card, where CountInterval will determine the count
+    pub next_moves: Vec<PlayerMove>,
+
+    pub next_action: NextAction,
+
+    // TODO these might still be a bit rough, i should find a better way to do them.
+    // maybe for more flexibility we could make a rule store a modifier on the state once it has been
+    // activated, and let it perform as a state machine. In fact we could make it a trait, and store a
+    // trait object, and a rule can decide to delete itself once it stopped being in action.
+    //
+    // Like an active rule takes in a move and modifies it in some way, returning whether the rule
+    // stopped being in action or continued
+    pub should_count_anything_but_the_correct_count: MoveRuleApplication,
+
+    pub should_hit: Option<(Players, HitType)>,
+}
+
+// maybe we can think of rules having RuleEffect's, where some rules only have the effect on the next move
+// and then forfeit their control, and some rules keep having effects for the rest of the game. Now effects
+// are perfectly compatible with double rules, since double rules is only regarding rule activation (which
+// launches effects on the game), not existing effects. this makes it possible for things like "at the rest
+// of the round, say anything but what you're supposed to say". Now a rule effect can take in an ActionChain
+// and return an ActionChain after it's been run (like changing the next player or move or whatever), but
+// since multiple rule effects can be active at the same time, there has to be an order to run them in. i
+// know for example, that the "chaos rule" of saying anything except what you're supposed to say would run
+// absolutely last of all rule effects. like maybe there's a rule effect first which determines that the
+// next player should say "1 o'clock". The chaos rule should run after this, and invert the fixed correct
+// move to instead be the set of moves that are not 1 o'clock instead. also let's say the move chain is
+// just fully deterministic but the chaos rule is active. if so the rule would still see what the supposed
+// deterministic action is, but insert a fixed move set in front of it that inverts it, and continue doing
+// this constantly (since the effect lasts forever)
+
+pub struct DeterministicMoveChain(CountInterval);
+pub struct DeterministicPlayerChain(PlayerDirection);
+
+pub enum MoveChain {
+    Deterministic(DeterministicMoveChain),
+    FixedAndThen {
+        // the hashset is if there are multiple possible valid moves
+        moves: Vec<HashSet<PlayerMove>>,
+        then: DeterministicMoveChain,
+    },
+}
+pub enum PlayerChain {
+    Deterministic(DeterministicPlayerChain),
+    FixedAndThen {
+        players: Vec<HashSet<PlayerId>>,
+        then: DeterministicPlayerChain,
+    },
+}
+
+pub enum ActionChain {
+    Moves {
+        move_chain: MoveChain,
+        player_chain: PlayerChain,
+    },
+    /// this is a termination state
+    /// but what happens if an error occurs during a hit? do we move to the error state?
+    Hit {
+        players: Vec<PlayerId>,
+        hit_type: HitType,
+    },
+    /// this is not a termination state, since any actions can follow, but once a person reports error,
+    /// the
+    Error {
+        chain_before_error: Box<ActionChain>,
+    },
+}
+
+// everything results in a round termination action.
+
+// if a player hit wrong, there will be a reaction time interval (settable in GameSettings)
+
+pub enum NextAction {
+    Move(PlayerMove),
+    EveryoneShouldHit(HitType),
+}
+
+pub enum Players {
+    Players(Vec<PlayerId>),
+    Everyone,
+}
+
+pub trait ActiveRule {
+    // returns whether the rule stopped being active
+    fn run(player: PlayerId, expected_action: &mut PlayerActionType) -> bool {
+        todo!()
+    }
 }
 
 impl RoundState {
@@ -80,30 +171,34 @@ pub enum RoundMessage {
     },
 }
 
-// might merge with RoundState tbh, or make it a field inside RoundState, but id have
-// to figure out immutability of the relevant RoundState parameters
-pub struct MutableRoundState {
-    // this runs after the next player index has been incremented,
-    // so it doesnt overwrite this provided value, and the same for next_count,
-    // as that would allow for arithmetic like what you should've said + half an hour
-    pub next_player: PlayerId,
-    pub next_count: Count,
+pub struct MutableRoundState<'a> {
+    pub next_players: &'a mut PlayerId,
+    pub next_count: &'a mut Count,
 
-    pub direction: TurnDirection,
-    pub count_interval: CountInterval,
+    pub direction: &'a mut PlayerDirection,
+    pub count_interval: &'a mut CountInterval,
 
-    pub should_lay_no_card: MoveRuleApplication,
-    pub should_count_the_name_of_this_rule: MoveRuleApplication,
-    pub should_count_anything_but_the_correct_count: MoveRuleApplication,
+    pub should_lay_no_card: &'a mut MoveRuleApplication,
+    pub should_count_the_name_of_this_rule: &'a mut MoveRuleApplication,
+    pub should_count_anything_but_the_correct_count: &'a mut MoveRuleApplication,
 
-    pub everyone_should_hit: Option<HitType>,
+    pub everyone_should_hit: &'a mut Option<HitType>,
 }
+
 /// in half an hour steps
-pub struct CountInterval(pub usize);
+/// supports negative numbers for backwards counting
+pub struct CountInterval(pub isize);
 impl CountInterval {
+    pub const MINUSTWOHOURS: Self = Self(-4);
+    pub const MINUSONEHOUR: Self = Self(-2);
+    pub const MINUSTHIRTYMINUTES: Self = Self(-1);
     pub const THIRTYMINUTES: Self = Self(1);
     pub const ONEHOUR: Self = Self(2);
     pub const TWOHOURS: Self = Self(4);
+
+    pub fn toggle_direction(&mut self) {
+        self.0 = -self.0
+    }
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
@@ -128,9 +223,9 @@ pub enum PlayerMove {
 
 #[derive(Serialize)]
 pub struct PlayerAction {
-    player_id: PlayerId,
-    time: DateTime<Utc>,
-    r#type: PlayerActionType,
+    pub player_id: PlayerId,
+    pub time: DateTime<Utc>,
+    pub r#type: PlayerActionType,
 }
 #[derive(Serialize, Deserialize)]
 pub enum PlayerActionType {
@@ -179,12 +274,12 @@ pub enum MoveRuleValidity {
     Indefinitely,
 }
 
-pub enum TurnDirection {
+pub enum PlayerDirection {
     Forward,
     Reverse,
 }
 
-impl TurnDirection {
+impl PlayerDirection {
     pub fn toggle(&mut self) {
         *self = match self {
             Self::Forward => Self::Reverse,

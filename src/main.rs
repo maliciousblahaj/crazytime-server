@@ -105,12 +105,12 @@ impl AppState {
         }
         Ok(())
     }
-    // async fn get_lobby_sender(
-    //     &mut self,
-    //     session_id: SessionId,
-    // ) -> Option<UnboundedSender<LobbyMessage>> {
-    //     if let
-    // }
+    async fn get_lobby_sender(
+        &mut self,
+        session_id: SessionId,
+    ) -> Option<UnboundedSender<LobbyMessage>> {
+        let lobby_code = self.session_lobby_index.get(&session_id)?;
+    }
 
     async fn alert_lobby_of_disconnect(&mut self, session_id: SessionId) {
         todo!()

@@ -1,9 +1,7 @@
 use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
 
-pub struct CardPool {
-    pub card_pool: Vec<Card>,
-}
+pub struct CardPool(Vec<Card>);
 
 impl CardPool {
     /// with fixed card pool
@@ -265,7 +263,11 @@ impl CardPool {
         let mut rng = rand::rng();
         card_pool.shuffle(&mut rng);
 
-        Self { card_pool }
+        Self(card_pool)
+    }
+
+    pub fn n_cards(&self) -> usize {
+        self.0.len()
     }
 }
 

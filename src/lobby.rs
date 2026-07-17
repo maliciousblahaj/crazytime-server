@@ -19,15 +19,18 @@ pub struct Lobby {
     pub game_state: Option<GameState>,
 }
 
+// maybe i should not keep a consistent host_tx. because if the thread can into the channel send a session id
+// each time as well, it might as well also send a ConnectionTx each time
+
 impl Lobby {
     pub fn new(lobby_code: LobbyCode, host_session: SessionId) -> Self {
-        let host = PlayerId::from(0);
+        let host_id = PlayerId::from(0);
         let mut player_map = LobbyPlayers::new();
-        player_map.insert(host_session, host);
+        player_map.insert(host_session, host_id, host_tx);
         Self {
             lobby_code,
             player_map,
-            host,
+            host: host_id,
             next_player_id: 1,
             game_settings: GameSettings::default(),
             game_state: None,
@@ -38,8 +41,10 @@ impl Lobby {
         &mut self,
         session_id: SessionId,
         message: LobbyMessage,
-        tx: UnboundedSender<ServerMessage>,
     ) -> Result<(), SendError<ServerMessage>> {
+        // this method will not be called without the player being joined in the lobby already
+        let player_id = self.player_map.get_player_id(&session_id).unwrap();
+        let tx = self.player_map.get_tx(&player_id).unwrap();
         match message {
             LobbyMessage::GameMessage(game_message) => match self.game_state {
                 Some(ref mut game_state) => {
@@ -72,6 +77,8 @@ impl Lobby {
     }
 }
 
+pub type ConnectionTx = UnboundedSender<ServerMessage>;
+
 // this is fetched on joining a lobby, or reconnecting to a lobby
 #[derive(Serialize)]
 pub struct LobbyInfo {
@@ -89,11 +96,15 @@ pub enum AddPlayerToLobbyError {
 
 impl Lobby {
     // anytime a player joins a lobby and connects to it
-    pub fn add_player(&mut self, player_session: SessionId) -> Result<(), AddPlayerToLobbyError> {
+    pub fn add_player(
+        &mut self,
+        session_id: SessionId,
+        tx: ConnectionTx,
+    ) -> Result<(), AddPlayerToLobbyError> {
         let player_id = PlayerId::from(self.next_player_id);
         self.next_player_id += 1;
         self.player_map
-            .insert(player_session, player_id)
+            .insert(session_id, player_id, tx)
             .map_err(AddPlayerToLobbyError::LobbyPlayersInsertError)?;
         Ok(())
     }
@@ -156,7 +167,7 @@ impl LobbyCode {
 #[derive(Default)]
 pub struct LobbyPlayers {
     session_player: HashMap<SessionId, PlayerId>,
-    player_session: BTreeMap<PlayerId, SessionId>,
+    player_session_tx: BTreeMap<PlayerId, (SessionId, ConnectionTx)>,
 }
 pub enum LobbyPlayersInsertError {
     PlayerAlreadyExists,
@@ -172,10 +183,11 @@ impl LobbyPlayers {
         &mut self,
         session_id: SessionId,
         player_id: PlayerId,
+        tx: ConnectionTx,
     ) -> Result<(), LobbyPlayersInsertError> {
         match (
             self.session_player.contains_key(&session_id),
-            self.player_session.contains_key(&player_id),
+            self.player_session_tx.contains_key(&player_id),
         ) {
             (true, true) => Err(LobbyPlayersInsertError::PlayerAndSessionAlreadyExists),
             (true, false) => Err(LobbyPlayersInsertError::SessionAlreadyExists),
@@ -183,28 +195,37 @@ impl LobbyPlayers {
             (false, false) => Ok(()),
         }?;
         self.session_player.insert(session_id, player_id);
-        self.player_session.insert(player_id, session_id);
+        self.player_session_tx.insert(player_id, (session_id, tx));
         Ok(())
     }
     // we dont need any smarter getters by index here, since this is just the lobby. in game
     // there will be the `Players` data structure instead
     pub fn players(&self) -> impl Iterator<Item = &PlayerId> {
-        self.player_session.keys()
+        self.player_session_tx.keys()
     }
     pub fn get_player_id(&self, session_id: &SessionId) -> Option<&PlayerId> {
         self.session_player.get(session_id)
     }
-    pub fn get_session_id(&self, player_id: &PlayerId) -> Option<&SessionId> {
-        self.player_session.get(player_id)
+    // pub fn get_session_id_tx(
+    //     &self,
+    //     player_id: &PlayerId,
+    // ) -> Option<&(SessionId, ConnectionTx)> {
+    //     self.player_session_tx.get(player_id)
+    // }
+    pub fn get_tx(&self, player_id: &PlayerId) -> Option<&ConnectionTx> {
+        self.player_session_tx.get(player_id).map(|s_t| &s_t.1)
     }
-    pub fn remove_by_player_id(&mut self, player_id: &PlayerId) -> Option<SessionId> {
-        let session_id = self.player_session.remove(player_id)?;
+    pub fn remove_by_player_id(
+        &mut self,
+        player_id: &PlayerId,
+    ) -> Option<(SessionId, ConnectionTx)> {
+        let (session_id, tx) = self.player_session_tx.remove(player_id)?;
         self.session_player.remove(&session_id);
-        Some(session_id)
+        Some((session_id, tx))
     }
     pub fn remove_by_session_id(&mut self, session_id: &SessionId) -> Option<PlayerId> {
         let player_id = self.session_player.remove(session_id)?;
-        self.player_session.remove(&player_id);
+        self.player_session_tx.remove(&player_id);
         Some(player_id)
     }
 }

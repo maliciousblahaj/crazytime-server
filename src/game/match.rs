@@ -15,7 +15,7 @@ pub struct MatchState {
     pub init_match_state: InitMatchState,
     pub card_pool: CardPool,
     pub players: MatchPlayers,
-    pub finished_rounds: Vec<FinishedRound>,
+    pub previous_rounds: Vec<FinishedRound>,
     pub current_round: Option<RoundState>,
 }
 
