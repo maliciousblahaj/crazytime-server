@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     game::{
-        ActiveGameSettings, GameSettings,
+        ActiveGameSettings, LobbySettings,
         r#match::InitMatchState,
         round::{InitRoundState, PlayerActionType, PlayerLostReason},
     },
@@ -18,38 +18,34 @@ pub mod lobby;
 pub mod rules;
 pub mod session;
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub enum ServerMessage {
-    // session
-    JoinedLobby(LobbyCode),
-
     // lobby
 
-    // this is provided whenever a users connection is established and they are already in a lobby (like if they disconnected),
-    // as well as when they join a lobby,
-    LobbyInfo(LobbyInfo),
+    // this is provided whenever a users connects to a lobby
+    ConnectedToLobby(LobbyInfo),
 
-    LobbyClosed,
     // LeftLobbyReason is not perfect, as the Disconnected variant will never be constructed (since if you're disconnected you
     // wont be able to receive that message anyways), but making two separate enums for representing this mostly overlapping
     // kind of state is more than it is worth in my opinion, at least right now.
     LeftLobby(LeftLobbyReason),
 
-    // this can also be updated while in the lobby, although some are not guaranteed
-    // to have effect on the current game, if it does change something, ActiveGameSettingsUpdated
-    // will fire
-    GameSettingsUpdated(GameSettings),
+    // this updates the lobby settings, and will still apply to the current game if it also causes ActiveGameSettings to update
+    LobbySettingsUpdated(LobbySettings),
     PlayerJoined(PlayerId),
+    PlayerOffline(PlayerId),
+    PlayerBackOnline(PlayerId),
     PlayerLeft {
-        player: PlayerId,
+        player_id: PlayerId,
         reason: LeftLobbyReason,
     },
     HostChanged(PlayerId),
 
     // game
-    GameStarted,
+    GameStarted, // will most likely also send MatchStarted at the same time, though not RoundStarted obviously
     GameEnded,
-    // if a game setting change triggers the current game
+    // if a lobby setting change triggers the current game
     ActiveGameSettingsUpdated(ActiveGameSettings),
     RuleAdded {
         criteria: Description,
@@ -59,18 +55,8 @@ pub enum ServerMessage {
     // match
     MatchStarted(InitMatchState),
     MatchEnded,
-    PlayerPickedUpCards {
-        player: PlayerId,
-        // i choose to not make this a Vec<Card>, even though it technically
-        // is publically feasible to figure which cards are picked up out in
-        // many situations. but i will make it harder by randomizing which ones
-        // of the revealed cards were actually picked up, like the player never
-        // saw the picking up motion, just that all revealed cards are now gone
-        // and both the user's pile has grown by e.g 5 cards, and the pool by 3.
-        n_cards: usize,
-    },
     PlayerGotRidOfCardsToPool {
-        player: PlayerId,
+        player_id: PlayerId,
         n_cards: usize,
     },
 
@@ -79,9 +65,20 @@ pub enum ServerMessage {
     RoundEnded {
         loser: PlayerId,
         reason: PlayerLostReason,
+        // i choose to not make this a Vec<Card>, even though it technically
+        // is publically feasible to figure which cards are picked up out in
+        // many situations. but i will make it harder by randomizing which ones
+        // of the revealed cards were actually picked up, like the player never
+        // saw the picking up motion, just that all revealed cards are now gone
+        // and both the user's pile has grown by e.g 5 cards, and the pool by 3.
+        //
+        // only problem i see with this being an usize instead of Vec<Card> is that
+        // maybe the usize might be bigger than the actual amount of cards revealed,
+        // but ill just make sure to never induce this state in code.
+        n_revealed_cards_picked_up: usize,
     },
     ActionPerformed {
-        player: PlayerId,
+        player_id: PlayerId,
         action: PlayerActionType,
     },
 
@@ -89,13 +86,17 @@ pub enum ServerMessage {
     Error(ErrorMessage),
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub enum ErrorMessage {
     NotInLobby,
     NotInRound,
     NotInGame,
     AlreadyInLobby,
     LobbyDoesNotExist,
+    // if you are not host and try send host messages
+    InsufficientPermissions,
+    AlreadyInGame,
 }
 
 /// corresponds exactly to the session id of the user, used to authenticate
@@ -111,7 +112,7 @@ impl SessionId {
 
 impl Display for SessionId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        todo!()
+        todo!() // TODO
     }
 }
 

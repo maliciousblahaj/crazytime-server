@@ -186,7 +186,7 @@ impl RoundState {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RoundInfo {
     init_state: InitRoundState,
@@ -194,7 +194,7 @@ pub struct RoundInfo {
     public_card_stacks: HashMap<PlayerId, Vec<Card>>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InitRoundState {
     starting_player: PlayerId,
@@ -276,7 +276,7 @@ pub enum InputPlayerAction {
     DeclareWin,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlayerAction {
     pub player_id: PlayerId,
@@ -284,7 +284,7 @@ pub struct PlayerAction {
     pub r#type: PlayerActionType,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum PlayerActionType {
     Move(PlayerMove),
@@ -346,7 +346,7 @@ impl PlayerDirection {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum HitType {
     // hit with right hand
@@ -357,7 +357,7 @@ pub enum HitType {
     UpsideDown,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum PlayerLostReason {
     // if you report a move that was valid

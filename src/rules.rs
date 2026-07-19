@@ -2,11 +2,11 @@ use crate::{
     card::{ClockType, Time},
     game::{
         r#match::MatchState,
-        round::{ActionChain, HitType, MutableRoundState, PlayerAction, TurnDirection},
+        round::{ActionChain, HitType, MutableRoundState, PlayerAction},
     },
 };
 use rand::seq::SliceRandom;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 pub type CriteriaFn = Box<dyn Fn(&MatchState) -> bool + Send>;
 
@@ -21,7 +21,7 @@ pub struct Rule {
     handler: RuleEffect,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuleInfo {
     rule: Description,
@@ -29,7 +29,7 @@ pub struct RuleInfo {
 }
 
 // potential future support of multiple languages
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Description {
     english: String,

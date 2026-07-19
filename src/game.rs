@@ -10,7 +10,7 @@ use crate::{
         r#match::{
             FinishedMatch, InitMatchState, MatchInfo, MatchMessage, MatchPlayers, MatchState,
         },
-        round::{FinishedRound, InitRoundState, MutableRoundState, PlayerAction, PlayerLostReason},
+        round::{FinishedRound, InitRoundState, PlayerAction, PlayerLostReason},
     },
     lobby::PlayerId,
     rules::{RuleInfo, RuleManager},
@@ -19,9 +19,12 @@ use crate::{
 pub mod r#match;
 pub mod round;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GameSettings {
+pub struct LobbySettings {
+    /// the max number of players for a lobby
+    pub max_players: usize,
+
     /// the time a player is allowed to execute a correct action, if not another player had intervened with
     /// and error. For example if you make a correct move in your turn, but almost just slightly before
     /// you, some other player moved out of their turn or hit in the middle, and since you made your move
@@ -43,16 +46,17 @@ pub struct GameSettings {
     pub action_timeout_rate: Duration,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum MaxCardsPickedUpWhenLosing {
     Finite(usize),
     Unlimited,
 }
 
-impl Default for GameSettings {
+impl Default for LobbySettings {
     fn default() -> Self {
         Self {
+            max_players: 10,
             expected_error_reaction_time: Duration::from_secs(2),
             cards_removed_at_correct_error_report: 0,
             max_cards_picked_up_when_losing: MaxCardsPickedUpWhenLosing::Finite(5),
@@ -60,9 +64,8 @@ impl Default for GameSettings {
         }
     }
 }
-
 /// game settings within a game
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct ActiveGameSettings {
     /// See [`GameSettings.expected_error_reaction_time`]
     pub expected_error_reaction_time: Duration,
@@ -75,15 +78,15 @@ pub struct ActiveGameSettings {
 }
 
 impl ActiveGameSettings {
-    pub fn update(&mut self, new_settings: GameSettings) {
+    pub fn update(&mut self, new_settings: LobbySettings) {
         self.expected_error_reaction_time = new_settings.expected_error_reaction_time;
         self.cards_removed_at_correct_error_report =
             new_settings.cards_removed_at_correct_error_report;
     }
 }
 
-impl From<GameSettings> for ActiveGameSettings {
-    fn from(value: GameSettings) -> Self {
+impl From<LobbySettings> for ActiveGameSettings {
+    fn from(value: LobbySettings) -> Self {
         Self {
             expected_error_reaction_time: value.expected_error_reaction_time,
             cards_removed_at_correct_error_report: value.cards_removed_at_correct_error_report,
@@ -160,7 +163,7 @@ pub struct GameContext<'a> {
 }
 
 // fetched on request
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct GameInfo {
     settings: ActiveGameSettings,
     active_rules: Vec<RuleInfo>,

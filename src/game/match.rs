@@ -36,7 +36,7 @@ impl MatchState {
 }
 
 /// is sent in LobbyInfo on request
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct MatchInfo {
     players: Vec<(PlayerId, usize)>,
     n_cards_in_pool: usize,
@@ -44,9 +44,9 @@ pub struct MatchInfo {
 }
 
 /// is sent when a new match starts
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct InitMatchState {
-    // how many cards in their private pile
+    // how many cards in their private card pile
     players: Vec<(PlayerId, usize)>,
     n_cards_in_pool: usize,
 }

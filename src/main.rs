@@ -94,7 +94,7 @@ async fn ws_endpoint(
         let mut pong_wait_timer: Option<Pin<Box<Sleep>>> = None;
 
         app_state.lobby_coordinator_tx.send(LobbyCoordinatorMessage::SessionConnected {
-            session_id: session_id.clone(),
+            session_id,
             connection_tx: connection_tx.clone()
         })
             .inspect_err(|e| tracing::error!(error = %e));
@@ -119,7 +119,7 @@ async fn ws_endpoint(
                                 connection_tx.send(ServerMessage::Error(ErrorMessage::InvalidClientMessage)).inspect_err(|e| tracing::error!(error = %e));
                                 continue 'ws_runtime;
                             };
-                            app_state.lobby_coordinator_tx.send(LobbyCoordinatorMessage::SessionMessage { session_id: session_id.clone(), message }).inspect_err(|e| tracing::error!(error = %e));
+                            app_state.lobby_coordinator_tx.send(LobbyCoordinatorMessage::SessionMessage { session_id, message }).inspect_err(|e| tracing::error!(error = %e));
                         },
                         Some(Ok(ws::Message::Ping(_))) => {
                             socket.send(ws::Message::Pong(())).await.inspect_err(|e| tracing::error!(error = %e));
@@ -149,7 +149,7 @@ async fn ws_endpoint(
                         }
                     }
                 }
-            }
+            };
         }
     })
 }

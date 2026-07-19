@@ -15,7 +15,7 @@ use crate::{
 };
 
 pub async fn lobby_coordinator_task(
-    lobby_coordinator_rx: UnboundedReceiver<LobbyCoordinatorMessage>,
+    mut lobby_coordinator_rx: UnboundedReceiver<LobbyCoordinatorMessage>,
 ) {
     let mut active_lobbies: JoinMap<LobbyCode, _> = JoinMap::new();
     let mut lobby_senders: HashMap<LobbyCode, UnboundedSender<InternalLobbyMessage>> =
@@ -45,7 +45,7 @@ pub async fn lobby_coordinator_task(
             Some(message) = lobby_coordinator_rx.recv() => {
                 match message {
                     LobbyCoordinatorMessage::SessionConnected { session_id, connection_tx } => {
-                        active_sessions.insert(session_id.clone(), connection_tx.clone());
+                        active_sessions.insert(session_id, connection_tx.clone());
                         if let Some(lobby_code) = session_lobby_map.get(&session_id) {
                             lobby_senders.get(lobby_code).unwrap().send(InternalLobbyMessage::PlayerConnected { session_id, connection_tx })
                                     .inspect_err(|e| tracing::error!(error = %e));
@@ -54,7 +54,7 @@ pub async fn lobby_coordinator_task(
                     LobbyCoordinatorMessage::SessionDisconnected(session_id) => {
                         active_sessions.remove(&session_id);
                         if let Some(lobby_code) = session_lobby_map.get(&session_id) {
-                            lobby_senders.get(lobby_code).unwrap().send(InternalLobbyMessage::PlayerDisconnected(session_id))
+                            lobby_senders.get(lobby_code).unwrap().send(InternalLobbyMessage::PlayerOffline(session_id))
                                     .inspect_err(|e| tracing::error!(error = %e));
                         }
                     }
@@ -72,7 +72,7 @@ pub async fn lobby_coordinator_task(
                                         .inspect_err(|e| tracing::error!(error = %e));
                                     continue 'runtime;
                                 };
-                                sender.send(InternalLobbyMessage::PlayerConnected{session_id: session_id.clone(), connection_tx: connection_tx.clone()});
+                                sender.send(InternalLobbyMessage::PlayerConnected{session_id: session_id, connection_tx: connection_tx.clone()});
                                 session_lobby_map.insert(session_id, lobby_code.clone());
                                 connection_tx.send(ServerMessage::JoinedLobby(lobby_code))
                                         .inspect_err(|e| tracing::error!(error = %e));
@@ -93,9 +93,9 @@ pub async fn lobby_coordinator_task(
                                 };
 
                                 let (lobby_tx, lobby_rx) = mpsc::unbounded_channel();
-                                active_lobbies.spawn(lobby_code, lobby_task(session_id, connection_tx, lobby_rx, remove_session_tx.clone()));
-                                lobby_senders.insert(lobby_code, lobby_tx);
-                                session_lobby_map.insert(session_id, lobby_code);
+                                active_lobbies.spawn(lobby_code.clone(), lobby_task(session_id, connection_tx.clone(), lobby_rx, remove_session_tx.clone()));
+                                lobby_senders.insert(lobby_code.clone(), lobby_tx);
+                                session_lobby_map.insert(session_id, lobby_code.clone());
                                 connection_tx.send(ServerMessage::JoinedLobby(lobby_code))
                                         .inspect_err(|e| tracing::error!(error = %e));
                             },
