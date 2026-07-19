@@ -203,10 +203,7 @@ pub struct InitRoundState {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum RoundMessage {
-    ActionPerformed {
-        player: PlayerId,
-        action: InputPlayerAction,
-    },
+    ActionPerformed(InputPlayerAction),
 }
 
 pub struct MutableRoundState<'a> {

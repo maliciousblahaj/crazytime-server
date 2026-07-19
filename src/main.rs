@@ -8,7 +8,7 @@ use axum::{
     routing::post,
 };
 use crazytime_server::{
-    ErrorMessage, ServerMessage, SessionId,
+    ClientMessage, ErrorMessage, ServerMessage, SessionId,
     lobby::{ConnectionTx, Lobby, LobbyCode, LobbyMessage},
     player::SessionId,
     session::{LobbyCoordinatorMessage, lobby_coordinator_task},
@@ -115,11 +115,11 @@ async fn ws_endpoint(
                     idle_timer.as_mut().reset(Instant::now() + idle_duration);
                     match ws_message {
                         Some(Ok(ws::Message::Text(text))) => {
-                            let Ok(message) = serde_json::from_str::<SessionMessage>(text) else {
+                            let Ok(message) = serde_json::from_str::<ClientMessage>(text) else {
                                 connection_tx.send(ServerMessage::Error(ErrorMessage::InvalidClientMessage)).inspect_err(|e| tracing::error!(error = %e));
                                 continue 'ws_runtime;
                             };
-                            app_state.lobby_coordinator_tx.send(LobbyCoordinatorMessage::SessionMessage { session_id, message }).inspect_err(|e| tracing::error!(error = %e));
+                            app_state.lobby_coordinator_tx.send(LobbyCoordinatorMessage::ClientMessage { session_id, message }).inspect_err(|e| tracing::error!(error = %e));
                         },
                         Some(Ok(ws::Message::Ping(_))) => {
                             socket.send(ws::Message::Pong(())).await.inspect_err(|e| tracing::error!(error = %e));

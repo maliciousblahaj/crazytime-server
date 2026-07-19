@@ -8,7 +8,7 @@ use crate::{
         r#match::InitMatchState,
         round::{InitRoundState, PlayerActionType, PlayerLostReason},
     },
-    lobby::{LeftLobbyReason, LobbyCode, LobbyInfo, PlayerId},
+    lobby::{LeftLobbyReason, LobbyCode, LobbyInfo, LobbyMessage, PlayerId},
     rules::Description,
 };
 
@@ -18,6 +18,7 @@ pub mod lobby;
 pub mod rules;
 pub mod session;
 
+/// a message sent from the server to a client
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ServerMessage {
@@ -99,6 +100,16 @@ pub enum ErrorMessage {
     AlreadyInGame,
 }
 
+/// a message sent from a client to the server
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ClientMessage {
+    JoinLobby(LobbyCode),
+    HostLobby,
+    LeaveLobby,
+    LobbyMessage(LobbyMessage),
+}
+
 /// corresponds exactly to the session id of the user, used to authenticate
 #[derive(Clone, Copy, Eq, PartialEq, Hash, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -108,14 +119,4 @@ impl SessionId {
     pub fn new() -> Self {
         Self(rand::random())
     }
-}
-
-impl Display for SessionId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        todo!() // TODO
-    }
-}
-
-pub struct SessionInfo {
-    current_lobby: Option<LobbyCode>,
 }

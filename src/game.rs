@@ -122,7 +122,12 @@ impl GameState {
     ) -> Result<(), SendError<ServerMessage>> {
         Ok(())
     }
-
+    pub fn lobby_settings_updated(
+        &mut self,
+        lobby_settings: LobbySettings,
+    ) -> Option<ActiveGameSettings> {
+        todo!()
+    }
     // /// can only be run during a round, else will return None
     // pub fn rule_input(&mut self) -> Option<(GameContext, MutableRoundState)> {
     //     let Some(match_state) = self.current_match else {

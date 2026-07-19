@@ -163,6 +163,12 @@ impl Lobby {
                         }
                     }
                     HostMessage::SetSettings(lobby_settings) => {
+                        self.settings = lobby_settings.clone();
+                        connection_tx
+                            .send(ServerMessage::LobbySettingsUpdated(lobby_settings.clone()));
+                        if let Some(game_state) = self.game_state {
+                            self.game_state.lobby_settings_updated(lobby_settings);
+                        }
                         // checks if Acti should be updated,
                         // if so call self.game_state.set_active_game_settings
                         // as well

@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use serde::Deserialize;
 use tokio::{
     select,
     sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
@@ -8,10 +7,8 @@ use tokio::{
 use tokio_util::task::JoinMap;
 
 use crate::{
-    ErrorMessage, ServerMessage, SessionId,
-    lobby::{
-        ConnectionTx, InternalLobbyMessage, LeftLobbyReason, LobbyCode, LobbyMessage, lobby_task,
-    },
+    ClientMessage, ErrorMessage, ServerMessage, SessionId,
+    lobby::{ConnectionTx, InternalLobbyMessage, LeftLobbyReason, LobbyCode, lobby_task},
 };
 
 pub async fn lobby_coordinator_task(
@@ -58,10 +55,10 @@ pub async fn lobby_coordinator_task(
                                     .inspect_err(|e| tracing::error!(error = %e));
                         }
                     }
-                    LobbyCoordinatorMessage::SessionMessage { session_id, message } => {
+                    LobbyCoordinatorMessage::ClientMessage { session_id, message } => {
                         let connection_tx = active_sessions.get(&session_id).unwrap().clone();
                         match message {
-                            SessionMessage::JoinLobby(lobby_code) => {
+                            ClientMessage::JoinLobby(lobby_code) => {
                                 if let Some(_lobby) = session_lobby_map.get(&session_id) {
                                     connection_tx.send(ServerMessage::Error(ErrorMessage::AlreadyInLobby))
                                         .inspect_err(|e| tracing::error!(error = %e));
@@ -77,7 +74,7 @@ pub async fn lobby_coordinator_task(
                                 connection_tx.send(ServerMessage::JoinedLobby(lobby_code))
                                         .inspect_err(|e| tracing::error!(error = %e));
                             },
-                            SessionMessage::HostLobby => {
+                            ClientMessage::HostLobby => {
                                 if let Some(_lobby) = session_lobby_map.get(&session_id) {
                                     connection_tx.send(ServerMessage::Error(ErrorMessage::AlreadyInLobby))
                                         .inspect_err(|e| tracing::error!(error = %e));
@@ -99,7 +96,7 @@ pub async fn lobby_coordinator_task(
                                 connection_tx.send(ServerMessage::JoinedLobby(lobby_code))
                                         .inspect_err(|e| tracing::error!(error = %e));
                             },
-                            SessionMessage::LeaveLobby => {
+                            ClientMessage::LeaveLobby => {
                                 let Some(lobby_code) = session_lobby_map.get(&session_id) else {
                                     connection_tx.send(ServerMessage::Error(ErrorMessage::NotInLobby))
                                         .inspect_err(|e| tracing::error!(error = %e));
@@ -111,7 +108,7 @@ pub async fn lobby_coordinator_task(
                                 connection_tx.send(ServerMessage::LeftLobby(LeftLobbyReason::Left))
                                         .inspect_err(|e| tracing::error!(error = %e));
                             }
-                            SessionMessage::LobbyMessage(message) => {
+                            ClientMessage::LobbyMessage(message) => {
                                 let Some(lobby_code) = session_lobby_map.get(&session_id) else {
                                     connection_tx.send(ServerMessage::Error(ErrorMessage::NotInLobby))
                                         .inspect_err(|e| tracing::error!(error = %e));
@@ -135,17 +132,8 @@ pub enum LobbyCoordinatorMessage {
         connection_tx: ConnectionTx,
     },
     SessionDisconnected(SessionId),
-    SessionMessage {
+    ClientMessage {
         session_id: SessionId,
-        message: SessionMessage,
+        message: ClientMessage,
     },
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum SessionMessage {
-    JoinLobby(LobbyCode),
-    HostLobby,
-    LeaveLobby,
-    LobbyMessage(LobbyMessage),
 }
