@@ -5,10 +5,27 @@ use crate::{
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
-use tokio::sync::mpsc::{UnboundedSender, error::SendError};
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+
+pub async fn lobby_task(
+    host_id: SessionId,
+    host_tx: ConnectionTx,
+    mut lobby_rx: UnboundedReceiver<InternalLobbyMessage>,
+    remove_session_tx: UnboundedSender<SessionId>,
+) {
+    let mut lobby = Lobby::new(host_id, host_tx);
+
+    // set up a timer on disconnect message
+
+    while let Some(message) = lobby_rx.recv().await {
+        // returns true if the lobby is finished
+        if lobby.handle_message(message).await {
+            break;
+        }
+    }
+}
 
 pub struct Lobby {
-    pub lobby_code: LobbyCode,
     pub player_map: LobbyPlayers,
     pub host: PlayerId,
 
@@ -20,15 +37,15 @@ pub struct Lobby {
 }
 
 // maybe i should not keep a consistent host_tx. because if the thread can into the channel send a session id
-// each time as well, it might as well also send a ConnectionTx each time
-
+// each time as well, it might as well also send a ConnectionTx each time, and we wont have to deal with cleaning
+// up things. not even on potential disconnect we need to store the tx, as there will be noone to send the kicked
+// message to anyways
 impl Lobby {
-    pub fn new(lobby_code: LobbyCode, host_session: SessionId) -> Self {
+    pub fn new(host_session: SessionId, host_tx: ConnectionTx) -> Self {
         let host_id = PlayerId::from(0);
         let mut player_map = LobbyPlayers::new();
         player_map.insert(host_session, host_id, host_tx);
         Self {
-            lobby_code,
             player_map,
             host: host_id,
             next_player_id: 1,
@@ -37,21 +54,34 @@ impl Lobby {
         }
     }
 
-    pub fn handle_message(
-        &mut self,
-        session_id: SessionId,
-        message: LobbyMessage,
-    ) -> Result<(), SendError<ServerMessage>> {
+    /// returns true if the lobby should end, but it should have sent all close messages before that
+    pub async fn handle_message(&mut self, message: InternalLobbyMessage) -> bool {
+        match message {
+            InternalLobbyMessage::LobbyMessage {
+                session_id,
+                message,
+            } => todo!(),
+            InternalLobbyMessage::AddPlayer(session_id) => {}
+            InternalLobbyMessage::RemovePlayer(session_id) => {}
+            InternalLobbyMessage::PlayerDisconnected(session_id) => todo!(),
+        }
         // this method will not be called without the player being joined in the lobby already
         let player_id = self.player_map.get_player_id(&session_id).unwrap();
-        let tx = self.player_map.get_tx(&player_id).unwrap();
+        // i wont take in the tx as a handle_message argument, since even if i could we still
+        // store all tx's to be able to broadcast messages to all players, so we might as well
+        // repurpose that store for other purposes.
+        let tx = self.player_map.get_tx(player_id).unwrap();
         match message {
             LobbyMessage::GameMessage(game_message) => match self.game_state {
                 Some(ref mut game_state) => {
-                    game_state.handle_message(player_id, game_message, tx)?;
+                    game_state
+                        .handle_message(player_id, game_message, tx)
+                        .await
+                        .inspect_err(|e| tracing::error!(error = %e));
                 }
                 None => {
-                    tx.send(ServerMessage::Error(ErrorMessage::NotInGame))?;
+                    tx.send(ServerMessage::Error(ErrorMessage::NotInGame))
+                        .inspect_err(|e| tracing::error!(error = %e));
                 }
             },
             LobbyMessage::StartGame => todo!(),
@@ -114,6 +144,8 @@ impl Lobby {
 // to have private behavior, call ordinary functions instead, like
 // self.game_state.unwrap().add_new_rule() or whatever. if this is identical to message
 // handling behavior, still put it in a function and call it from the message handler
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum LobbyMessage {
     StartGame,
     TransferHost(PlayerId),
@@ -123,18 +155,25 @@ pub enum LobbyMessage {
     CloseLobby,
 
     GameMessage(GameMessage),
+}
 
-    // internal messages, not for call
-    // messages like these when processed can still deletate things like gamemessage to lower types
-    AddPlayer(SessionId),
-    RemovePlayer(SessionId),
+pub enum InternalLobbyMessage {
+    LobbyMessage {
+        session_id: SessionId,
+        message: LobbyMessage,
+    },
+    PlayerConnected {
+        session_id: SessionId,
+        connection_tx: ConnectionTx,
+    },
     PlayerDisconnected(SessionId),
+    PlayerLeft(SessionId),
 }
 
 #[derive(Serialize)]
 pub enum LeftLobbyReason {
+    Left,
     KickedByHost,
-    // LobbyEnded,
     Disconnected,
 }
 
@@ -148,7 +187,7 @@ impl From<usize> for PlayerId {
     }
 }
 
-#[derive(Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct LobbyCode(String);
 
 impl LobbyCode {
@@ -163,6 +202,9 @@ impl LobbyCode {
         Self(code)
     }
 }
+
+// the reason for why we store tx for each player in here is that obviously most lobby events that
+// are initiated by one player will be broadcasted to many other players.
 
 #[derive(Default)]
 pub struct LobbyPlayers {

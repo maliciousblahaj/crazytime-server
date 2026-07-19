@@ -16,6 +16,7 @@ pub mod card;
 pub mod game;
 pub mod lobby;
 pub mod rules;
+pub mod session;
 
 #[derive(Serialize)]
 pub enum ServerMessage {
@@ -29,6 +30,9 @@ pub enum ServerMessage {
     LobbyInfo(LobbyInfo),
 
     LobbyClosed,
+    // LeftLobbyReason is not perfect, as the Disconnected variant will never be constructed (since if you're disconnected you
+    // wont be able to receive that message anyways), but making two separate enums for representing this mostly overlapping
+    // kind of state is more than it is worth in my opinion, at least right now.
     LeftLobby(LeftLobbyReason),
 
     // this can also be updated while in the lobby, although some are not guaranteed
@@ -95,7 +99,8 @@ pub enum ErrorMessage {
 }
 
 /// corresponds exactly to the session id of the user, used to authenticate
-#[derive(Clone, Copy, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Eq, PartialEq, Hash, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionId(u128);
 
 impl SessionId {

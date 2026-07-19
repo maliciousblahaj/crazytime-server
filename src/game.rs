@@ -1,6 +1,6 @@
 use std::{collections::HashMap, sync::mpsc::SendError, time::Duration};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{
@@ -19,7 +19,8 @@ use crate::{
 pub mod r#match;
 pub mod round;
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GameSettings {
     /// the time a player is allowed to execute a correct action, if not another player had intervened with
     /// and error. For example if you make a correct move in your turn, but almost just slightly before
@@ -34,11 +35,29 @@ pub struct GameSettings {
 
     /// if you report an error correctly, how many cards will you get rid of from your pile
     pub cards_removed_at_correct_error_report: usize,
+
+    /// how many of the revealed cards you will pick up if you lose the round
+    pub max_cards_picked_up_when_losing: MaxCardsPickedUpWhenLosing,
+
+    /// how long an action should take before the player loses on timeout
+    pub action_timeout_rate: Duration,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MaxCardsPickedUpWhenLosing {
+    Finite(usize),
+    Unlimited,
 }
 
 impl Default for GameSettings {
     fn default() -> Self {
-        Self { expected_error_reaction_time: Duration::from_secs(2), cards_removed_at_correct_error_report: 0 }
+        Self {
+            expected_error_reaction_time: Duration::from_secs(2),
+            cards_removed_at_correct_error_report: 0,
+            max_cards_picked_up_when_losing: MaxCardsPickedUpWhenLosing::Finite(5),
+            action_timeout_rate: Duration::from_secs(10),
+        }
     }
 }
 
@@ -49,17 +68,28 @@ pub struct ActiveGameSettings {
     pub expected_error_reaction_time: Duration,
     /// See [`GameSettings.cards_removed_at_correct_error_report`]
     pub cards_removed_at_correct_error_report: usize,
+    /// See [`GameSettings.max_cards_picked_up_when_losing`]
+    pub max_cards_picked_up_when_losing: MaxCardsPickedUpWhenLosing,
+    /// See [`GameSettings.action_timeout_rate`]
+    pub action_timeout_rate: Duration,
 }
 
 impl ActiveGameSettings {
     pub fn update(&mut self, new_settings: GameSettings) {
         self.expected_error_reaction_time = new_settings.expected_error_reaction_time;
-        self.cards_removed_at_correct_error_report = new_settings.cards_removed_at_correct_error_report;
+        self.cards_removed_at_correct_error_report =
+            new_settings.cards_removed_at_correct_error_report;
+    }
 }
 
 impl From<GameSettings> for ActiveGameSettings {
     fn from(value: GameSettings) -> Self {
-        Self { expected_error_reaction_time: value.expected_error_reaction_time }
+        Self {
+            expected_error_reaction_time: value.expected_error_reaction_time,
+            cards_removed_at_correct_error_report: value.cards_removed_at_correct_error_report,
+            max_cards_picked_up_when_losing: value.max_cards_picked_up_when_losing,
+            action_timeout_rate: value.action_timeout_rate,
+        }
     }
 }
 
@@ -90,29 +120,29 @@ impl GameState {
         Ok(())
     }
 
-    /// can only be run during a round, else will return None
-    pub fn rule_input(&mut self) -> Option<(GameContext, MutableRoundState)> {
-        let Some(match_state) = self.current_match else {
-            return None;
-        };
-        let Some(round_state) = match_state.current_round else {
-            return None;
-        };
+    // /// can only be run during a round, else will return None
+    // pub fn rule_input(&mut self) -> Option<(GameContext, MutableRoundState)> {
+    //     let Some(match_state) = self.current_match else {
+    //         return None;
+    //     };
+    //     let Some(round_state) = match_state.current_round else {
+    //         return None;
+    //     };
 
-        Some((GameContext {
-            players: &match_state.players,
-            n_cards_in_pool: match_state.card_pool.n_cards(),
-            previous_matches: &self.previous_matches,
-            previous_rounds: &match_state.previous_rounds,
-            init_match_state: &match_state.init_match_state,
-            init_round_state: &round_state.init_round_state,
-            player_actions: &round_state.player_actions,
-            public_card_stacks: &round_state.public_card_stacks,
-            error_occured: &round_state.error_occured,
-        }, MutableRoundState {
-                
-            })
-    }
+    //     Some((GameContext {
+    //         players: &match_state.players,
+    //         n_cards_in_pool: match_state.card_pool.n_cards(),
+    //         previous_matches: &self.previous_matches,
+    //         previous_rounds: &match_state.previous_rounds,
+    //         init_match_state: &match_state.init_match_state,
+    //         init_round_state: &round_state.init_round_state,
+    //         player_actions: &round_state.player_actions,
+    //         public_card_stacks: &round_state.public_card_stacks,
+    //         error_occured: &round_state.error_occured,
+    //     }, MutableRoundState {
+
+    //         })
+    // }
 }
 pub struct GameContext<'a> {
     pub players: &'a MatchPlayers,
@@ -138,6 +168,8 @@ pub struct GameInfo {
     last_match_winner: Option<PlayerId>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum GameMessage {
     MatchMessage(MatchMessage),
 }

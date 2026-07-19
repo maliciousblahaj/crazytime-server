@@ -6,7 +6,7 @@ use crate::{
         round::{FinishedRound, RoundInfo, RoundMessage, RoundState},
     },
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sorted_vec::SortedVec;
 use std::{collections::HashMap, sync::mpsc::SendError};
 use tokio::sync::mpsc::UnboundedSender;
@@ -19,6 +19,8 @@ pub struct MatchState {
     pub current_round: Option<RoundState>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum MatchMessage {
     RoundMessage(RoundMessage),
 }

@@ -271,7 +271,8 @@ impl CardPool {
     }
 }
 
-#[derive(Clone, Copy, Serialize, Deserialize)]
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Card {
     pub clock: ClockType,
     pub time: Time,
@@ -296,7 +297,8 @@ impl Card {
     }
 }
 
-#[derive(Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub enum ClockType {
     Sun,
     Hourglass,
@@ -308,7 +310,8 @@ pub enum ClockType {
     TimeMachine,
 }
 
-#[derive(Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub enum Time {
     One,
     OneThirty,
@@ -414,6 +417,7 @@ impl Time {
 
 /// The "valid" input times a player can count
 #[derive(Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum InputTime {
     Zero,
     ZeroThirty,

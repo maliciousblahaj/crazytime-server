@@ -9,8 +9,9 @@ use axum::{
 };
 use crazytime_server::{
     ErrorMessage, ServerMessage, SessionId,
-    lobby::{Lobby, LobbyCode, LobbyMessage},
+    lobby::{ConnectionTx, Lobby, LobbyCode, LobbyMessage},
     player::SessionId,
+    session::{LobbyCoordinatorMessage, lobby_coordinator_task},
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -22,117 +23,28 @@ use tokio::{
     select,
     sync::{
         Mutex,
-        mpsc::{self, Sender, UnboundedSender, error::SendError},
+        mpsc::{self, Sender, UnboundedReceiver, UnboundedSender, error::SendError},
     },
-    task::JoinHandle,
+    task::{self, JoinHandle, JoinSet},
     time::sleep,
 };
+use tokio_util::task::JoinMap;
 
 #[derive(Clone)]
 struct AppState {
-    active_lobbies: HashMap<LobbyCode, ActiveLobbyHandle>,
-    session_lobby_index: HashMap<SessionId, LobbyCode>,
+    lobby_coordinator: JoinHandle<()>,
+    lobby_coordinator_tx: UnboundedSender<LobbyCoordinatorMessage>,
 }
 
 impl AppState {
-    fn new() -> Self {
+    async fn new() -> Self {
+        let (lobby_coordinator_tx, lobby_coordinator_rx) = mpsc::unbounded_channel();
+        let lobby_coordinator = tokio::spawn(lobby_coordinator_task(lobby_coordinator_rx));
         Self {
-            active_lobbies: DashMap::new(),
-            session_lobby_index: HashMap::new(),
+            lobby_coordinator,
+            lobby_coordinator_tx,
         }
     }
-
-    /// host a lobby. returns its lobbycode if succeeded
-    ///
-    /// returns Err(code) if you're already in a lobby with a certain code
-    async fn host_lobby(&mut self, session_id: SessionId) -> Result<LobbyCode, LobbyCode> {
-        if let Some(lobby_code) = self.session_lobby_index.get(&session_id) {
-            return Err(lobby_code);
-        }
-
-        // generate new lobby code without collisions
-        let lobby_code = loop {
-            let code = LobbyCode::new();
-            if !self.active_lobbies.contains_key(&code) {
-                break code;
-            }
-        };
-
-        let lobby = Lobby::new(lobby_code, session_id);
-        self.active_lobbies.insert(lobby.lobby_code, lobby);
-        self.session_lobby_index
-            .insert(session_id, lobby.lobby_code);
-        lobby_code
-    }
-
-    async fn handle_message(
-        &mut self,
-        session_id: SessionId,
-        message: SessionMessage,
-        tx: UnboundedSender<ServerMessage>,
-    ) -> Result<(), SendError<ServerMessage>> {
-        // TODOOOOOOO
-        match message {
-            SessionMessage::JoinLobby(lobby_code) => {
-                if let Some(lobby) = self.session_lobby_index.get(&session_id) {
-                    tx.send(ServerMessage::Error(ErrorMessage::AlreadyInLobby))
-                        .await?;
-                    return;
-                }
-                let Some(handle) = self.active_lobbies.get(&lobby_code) else {
-                    tx.send(ServerMessage::Error(ErrorMessage::LobbyDoesNotExist))
-                        .await?;
-                    return;
-                };
-            }
-            SessionMessage::HostLobby => todo!(),
-            SessionMessage::LobbyMessage(lobby_message) => {
-                let Some(lobby_code) = self.session_lobby_index.get(&session_id) else {
-                    tx.send(ServerMessage::Error(ErrorMessage::NotInLobby))
-                        .await?;
-                    return;
-                };
-                if let Err(e) = self.send_lobby_message(session_id, lobby_message, tx) {
-                    match e {
-                        SendLobbyMessageError::LobbyDoesNotExist => {
-                            tx.send(ServerMessage::Error(ErrorMessage::LobbyDoesNotExist))
-                                .await?;
-                            return;
-                        }
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-    async fn get_lobby_sender(
-        &mut self,
-        session_id: SessionId,
-    ) -> Option<UnboundedSender<LobbyMessage>> {
-        let lobby_code = self.session_lobby_index.get(&session_id)?;
-    }
-
-    async fn alert_lobby_of_disconnect(&mut self, session_id: SessionId) {
-        todo!()
-    }
-    async fn connection_added(
-        &mut self,
-        session_id: SessionId,
-        tx: UnboundedSender<ServerMessage>,
-    ) {
-        todo!()
-    }
-}
-
-struct ActiveLobbyHandle {
-    handle: JoinHandle<()>,
-    sender: UnboundedSender<LobbyMessage>,
-}
-
-enum JoinLobbyError {
-    LobbyDoesNotExist,
-    LobbyIsFull,
-    AlreadyInLobby(LobbyCode),
 }
 
 #[tokio::main]
@@ -159,7 +71,7 @@ async fn main() -> color_eyre::Result<()> {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WsAuthForm {
-    player_id: SessionId,
+    session_id: SessionId,
 }
 
 async fn get_token_endpoint() -> impl IntoResponse {
@@ -172,8 +84,8 @@ async fn ws_endpoint(
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
     ws.on_upgrade(async move |mut socket| {
-        let session_id = input.player_id;
-        let (tx, rx) = mpsc::unbounded_channel();
+        let session_id = input.session_id;
+        let (connection_tx, connection_rx) = mpsc::unbounded_channel();
 
         let idle_duration = Duration::from_secs(20);
         let pong_wait_duration = Duration::from_secs(10);
@@ -181,29 +93,33 @@ async fn ws_endpoint(
         tokio::pin!(idle_timer);
         let mut pong_wait_timer: Option<Pin<Box<Sleep>>> = None;
 
-        // so it can receive appropriate welcome messages
-        app_state.connection_added(session_id, tx.clone()).await;
-        loop {
+        app_state.lobby_coordinator_tx.send(LobbyCoordinatorMessage::SessionConnected {
+            session_id: session_id.clone(),
+            connection_tx: connection_tx.clone()
+        })
+            .inspect_err(|e| tracing::error!(error = %e));
+        'ws_runtime: loop {
             select! {
                 // this polls the idle timer, and if it's ready (finished sleeping), this will run
                 _ = &mut idle_timer, if pong_wait_timer.is_none() => {
                     socket.send(ws::Message::Ping(())).await.inspect_err(|e| tracing::error!(error = %e, "ping send failed"));
                     pong_wait_timer = Some(Box::pin(sleep(pong_wait_duration)));
-                },
+                }
                 // async block is needed becuase select! expects a future, and this is an Option<impl Future>
+                // this block is identical as Some(Ok(ws::Message::Close) below)
                 _ = async { pong_wait_timer.as_mut().unwrap().await }, if pong_wait_timer.is_some() => {
-                    tracing::warn!(?session_id, "pong timeout, disconnecting");
-                    break;
-                },
+                    app_state.lobby_coordinator_tx.send(LobbyCoordinatorMessage::SessionDisconnected(session_id));
+                    break 'ws_runtime;
+                }
                 ws_message = socket.recv() => {
                     idle_timer.as_mut().reset(Instant::now() + idle_duration);
                     match ws_message {
                         Some(Ok(ws::Message::Text(text))) => {
                             let Ok(message) = serde_json::from_str::<SessionMessage>(text) else {
-                                tx.send(ServerMessage::Error(ErrorMessage::InvalidClientMessage)).inspect_err(|e| tracing::error!(error = %e));
-                                continue;
+                                connection_tx.send(ServerMessage::Error(ErrorMessage::InvalidClientMessage)).inspect_err(|e| tracing::error!(error = %e));
+                                continue 'ws_runtime;
                             };
-                            app_state.handle_message(session_id, message, tx.clone()).await.inspect_err(|e| tracing::error!(error = %e));
+                            app_state.lobby_coordinator_tx.send(LobbyCoordinatorMessage::SessionMessage { session_id: session_id.clone(), message }).inspect_err(|e| tracing::error!(error = %e));
                         },
                         Some(Ok(ws::Message::Ping(_))) => {
                             socket.send(ws::Message::Pong(())).await.inspect_err(|e| tracing::error!(error = %e));
@@ -212,41 +128,28 @@ async fn ws_endpoint(
                             pong_wait_timer = None;
                         }
                         Some(Ok(ws::Message::Close(_))) | None => {
-                            // the connection closed. user might later reconnect by starting a new connection, in which the
-                            // AppState::connection_added method has them covered to recover the session
-                            //
-                            // btw message the lobby in some way so it can know to start a wait timer before it disconnects the player
-                            app_state.alert_lobby_of_disconnect(session_id).await.inspect_err(|e| tracing::error!(error = %e));
-                            break;
+                            // the connection closed. user might later reconnect by starting a new connection with the same
+                            // session_id, in which they can recover their lobby
+                            app_state.lobby_coordinator_tx.send(LobbyCoordinatorMessage::SessionDisconnected(session_id));
+                            break 'ws_runtime;
                         }
                         Some(_) => {
-                            tx.send(ServerMessage::Error(ErrorMessage::InvalidClientMessage)).inspect_err(|e| tracing::error!(error = %e));
+                            connection_tx.send(ServerMessage::Error(ErrorMessage::InvalidClientMessage)).inspect_err(|e| tracing::error!(error = %e));
                         }
                     }
-                },
-                server_message = rx.recv() => {
-                    match server_message{
-                        Some(ServerMessage::Ping) => {
-                            socket.send(ws::Message::Ping(())).await.inspect_err(|e| tracing::error!(error = %e));
-                        }
+                }
+                server_message = connection_rx.recv() => {
+                    match server_message {
                         Some(message) => {
                             let json = serde_json::to_string(&message).unwrap();
                             socket.send(ws::Message::Text(json)).await.inspect_err(|e| tracing::error!(error = %e));
-                        },
+                        }
                         None => {
-                            println!("impossible!");
-                        },
+                            panic!("impossible!");
+                        }
                     }
                 }
             }
         }
     })
-}
-
-#[serde(rename_all = "camelCase")]
-#[derive(Deserialize)]
-pub enum SessionMessage {
-    JoinLobby(LobbyCode),
-    HostLobby,
-    LobbyMessage(LobbyMessage),
 }

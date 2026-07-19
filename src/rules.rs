@@ -2,14 +2,15 @@ use crate::{
     card::{ClockType, Time},
     game::{
         r#match::MatchState,
-        round::{HitType, MutableRoundState, PlayerAction, TurnDirection},
+        round::{ActionChain, HitType, MutableRoundState, PlayerAction, TurnDirection},
     },
 };
 use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
 
-pub type CriteriaFn = Box<dyn Fn(&MatchState) -> bool>;
-pub type RuleFn = Box<dyn Fn(&mut MutableRoundState, &MatchState)>;
+pub type CriteriaFn = Box<dyn Fn(&MatchState) -> bool + Send>;
+
+pub type RuleEffect = Box<dyn Fn(ActionChain, &MatchState) -> ActionChain + Send>;
 
 pub struct Criteria {
     description: Description,
@@ -17,10 +18,11 @@ pub struct Criteria {
 }
 pub struct Rule {
     description: Description,
-    handler: RuleFn,
+    handler: RuleEffect,
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RuleInfo {
     rule: Description,
     criteria: Description,
@@ -28,6 +30,7 @@ pub struct RuleInfo {
 
 // potential future support of multiple languages
 #[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Description {
     english: String,
 }
@@ -41,7 +44,7 @@ impl Description {
 }
 
 pub struct RuleManager {
-    active_rules: Vec<(Criteria, Rule)>,
+    match_rules: Vec<(Criteria, Rule)>,
     // these are for selecting new active rules from
     criteria_pool: Vec<Criteria>,
     rule_pool: Vec<Rule>,

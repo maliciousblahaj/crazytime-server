@@ -22,24 +22,6 @@ pub struct RoundState {
 
     /// the index of player_actions when it occured, and the reason
     pub error_occured: Option<(usize, PlayerLostReason)>,
-
-    /// if this is empty, direction will determine the next player instead
-    pub next_players: Vec<PlayerId>,
-    /// if this is empty, default is count and lay card, where CountInterval will determine the count
-    pub next_moves: Vec<PlayerMove>,
-
-    pub next_action: NextAction,
-
-    // TODO these might still be a bit rough, i should find a better way to do them.
-    // maybe for more flexibility we could make a rule store a modifier on the state once it has been
-    // activated, and let it perform as a state machine. In fact we could make it a trait, and store a
-    // trait object, and a rule can decide to delete itself once it stopped being in action.
-    //
-    // Like an active rule takes in a move and modifies it in some way, returning whether the rule
-    // stopped being in action or continued
-    pub should_count_anything_but_the_correct_count: MoveRuleApplication,
-
-    pub should_hit: Option<(Players, HitType)>,
 }
 
 // maybe we can think of rules having RuleEffect's, where some rules only have the effect on the next move
@@ -76,27 +58,79 @@ pub enum PlayerChain {
     },
 }
 
+/// The correct chain of actions in a state
 pub enum ActionChain {
     Moves {
         move_chain: MoveChain,
         player_chain: PlayerChain,
     },
-    /// this is a termination state
-    /// but what happens if an error occurs during a hit? do we move to the error state?
     Hit {
         players: Vec<PlayerId>,
         hit_type: HitType,
     },
-    /// this is not a termination state, since any actions can follow, but once a person reports error,
-    /// the
-    Error {
+    ReportError {
+        error_player: PlayerId,
+        first_error_occured: DateTime<Utc>,
         chain_before_error: Box<ActionChain>,
     },
 }
 
-// everything results in a round termination action.
+enum ActionChainAdvancement {
+    Continue,
+    PlayerLostRound(PlayerId),
+    PlayerWonMatch(PlayerId),
+}
 
-// if a player hit wrong, there will be a reaction time interval (settable in GameSettings)
+// maybe the advancement should be a rule effect in and of itself, that is inserted first out of all
+// rule effects. Maybe they should be called purely RoundEffect or Effect instead, and runs all the
+// time. And they only need to calculate the next move, as it will be always be run guaranteeing a
+// next move even if no other effects are active. What speaks against this idea is that the advancement
+// rule effect would store data that other effects should be able to modify. of course we could solve
+// this by letting the effect stack as it's run make each effect insert some state that others can
+// read and update, and after all are processed we run the effects in order. this would enable more
+// flexibility in making really advanced meta rules.
+//
+// so the base effect would declare 2 fields and their current value, the next effect would maybe declare
+// another one and modify the previous two, and then the next effect would not declare anything and modify
+// some previous one. now all the arguments are set in stone. so the first effect has gotten the updated
+// argument, and runs, and so on.
+//
+// but this generalization will only be useful if effects should be able to declare parameters which other
+// effects can modify, and none of the existing crazytime rules require this high degree of flexibility,
+// so i will skip this generalization for now and leave this comment here. For now we assume only the base
+// rule effect can declare fields, with the fields being hardcoded, and represent it hardcoded as well,
+// and not as an effect.
+
+impl ActionChain {
+    // returns Some if the round terminates, with who made the most error
+    pub fn advance(&mut self, action: &PlayerAction) -> Option<PlayerId> {
+        match action.r#type {
+            PlayerActionType::Move(player_move) => {}
+            PlayerActionType::Hit(hit_type) => todo!(),
+            PlayerActionType::ReportError => match self {
+                ActionChain::ReportError {
+                    error_player,
+                    first_error_occured,
+                    chain_before_error,
+                } => Some(error_player),
+                // these should either let you go free if game settings reaction time allows it
+                // or make you the player who made the worst error
+                //
+                // and if someone makes a wrong move, the previous chain will stay as is, like that person
+                // is the one who should've made a move, so if you make a "right" move after a wrong move,
+                // even if the time has gone, your move was wrong because it wasn't that player doing their
+                // correct move, but you doing a move instead out of your turn
+                ActionChain::Moves {
+                    move_chain,
+                    player_chain,
+                } => todo!(),
+                ActionChain::Hit { players, hit_type } => todo!(),
+            },
+            // should happen during a move where that player is ruled in turn, and also terminates
+            PlayerActionType::DeclareWin => todo!(),
+        }
+    }
+}
 
 pub enum NextAction {
     Move(PlayerMove),
@@ -153,6 +187,7 @@ impl RoundState {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RoundInfo {
     init_state: InitRoundState,
     latest_player_actions: Vec<(PlayerId, PlayerAction)>,
@@ -160,14 +195,17 @@ pub struct RoundInfo {
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct InitRoundState {
     starting_player: PlayerId,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum RoundMessage {
     ActionPerformed {
         player: PlayerId,
-        action: PlayerActionType,
+        action: InputPlayerAction,
     },
 }
 
@@ -202,6 +240,7 @@ impl CountInterval {
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum Count {
     Time(InputTime),
     NameOfThisRule,
@@ -214,24 +253,43 @@ pub struct FinishedRound {
     pub error_occured: Option<usize>,
 }
 
-#[derive(Clone, Copy, Serialize, Deserialize)]
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub enum PlayerMove {
     CountAndLayCard { card: Card, count: Count },
     Count(Count),
     LayCard(Card),
 }
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum InputPlayerMove {
+    CountAndLayCard(Count),
+    Count(Count),
+    LayCard,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum InputPlayerAction {
+    Move(InputPlayerMove),
+    Hit(HitType),
+    ReportError,
+    DeclareWin,
+}
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PlayerAction {
     pub player_id: PlayerId,
     pub time: DateTime<Utc>,
     pub r#type: PlayerActionType,
 }
-#[derive(Serialize, Deserialize)]
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub enum PlayerActionType {
     Move(PlayerMove),
     Hit(HitType),
-    CallError,
+    ReportError,
     DeclareWin,
 }
 pub struct MoveRuleApplication(Option<MoveRuleApplicationInner>);
@@ -289,6 +347,7 @@ impl PlayerDirection {
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum HitType {
     // hit with right hand
     Single,
@@ -298,7 +357,8 @@ pub enum HitType {
     UpsideDown,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub enum PlayerLostReason {
     // if you report a move that was valid
     FaultyErrorReport,
