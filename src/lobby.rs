@@ -68,6 +68,7 @@ pub async fn lobby_task(
 
 pub struct Lobby {
     pub player_map: LobbyPlayers,
+    pub broadcaster: LobbyBroadcaster,
     pub host: PlayerId,
 
     /// next public player id, for incremental assignment
@@ -81,22 +82,16 @@ impl Lobby {
     pub fn new(host_session: SessionId, host_tx: ConnectionTx) -> Self {
         let host_id = PlayerId::from(0);
         let mut player_map = LobbyPlayers::new();
-        player_map.insert(host_session, host_id, host_tx);
+        player_map.insert(host_session, host_id);
+        let mut broadcaster = LobbyBroadcaster::new();
+        broadcaster.add_player_tx(host_id, host_tx);
         Self {
             player_map,
+            broadcaster,
             host: host_id,
             next_player_id: 1,
             settings: LobbySettings::default(),
             game_state: None,
-        }
-    }
-
-    // send a server message to all online players in the lobby
-    pub fn broadcast(&self, message: ServerMessage) {
-        for (_session, connection_tx) in self.player_map.session_tx_values() {
-            if let Some(connection_tx) = connection_tx {
-                connection_tx.send(message.clone());
-            }
         }
     }
 
@@ -105,74 +100,87 @@ impl Lobby {
         // player already exists and reconnected (there is no way to reach this state by joining on two different devices simultaneously,
         // as they would've been hit with ErrorMessage::AlreadyInLobby at join attempt)
         if let Some(&player_id) = self.player_map.get_player_id(&session_id) {
-            self.player_map.add_tx(player_id, connection_tx);
-            self.broadcast(ServerMessage::PlayerBackOnline(player_id));
+            self.broadcaster.add_player_tx(player_id, connection_tx);
+            self.broadcaster
+                .broadcast(ServerMessage::PlayerBackOnline(player_id));
+            self.broadcaster.send_to_player(
+                &player_id,
+                ServerMessage::ConnectedToLobby(self.lobby_info()),
+            );
             return;
         }
         // player just joined
         let player_id = PlayerId::from(self.next_player_id);
         self.next_player_id += 1;
-        self.player_map
-            .insert(session_id, player_id, connection_tx)
-            .unwrap();
-        self.broadcast(ServerMessage::PlayerJoined(player_id));
+        self.player_map.insert(session_id, player_id).unwrap();
+        self.broadcaster
+            .add_player_tx(player_id, connection_tx.clone());
+        self.broadcaster
+            .broadcast(ServerMessage::PlayerJoined(player_id));
+        self.broadcaster.send_to_player(
+            &player_id,
+            ServerMessage::ConnectedToLobby(self.lobby_info()),
+        );
     }
 
     // returns true if the lobby should end, where it should have sent all close messages before that
     fn handle_lobby_message(&mut self, session_id: SessionId, message: LobbyMessage) -> bool {
-        // this method will not be called without the player being joined in the lobby already
         let player_id = *self.player_map.get_player_id(&session_id).unwrap();
-        // i wont take in the tx as a handle_message argument, since even if i could we still
-        // store all tx's to be able to broadcast messages to all players, so we might as well
-        // repurpose that store for other purposes.
-        let connection_tx = self.player_map.get_tx(&player_id).unwrap().unwrap().clone();
         match message {
             LobbyMessage::GameMessage(game_message) => match self.game_state {
                 Some(ref mut game_state) => {
-                    game_state
-                        .handle_message(player_id, game_message, connection_tx)
-                        .inspect_err(|e| tracing::error!(error = %e));
+                    game_state.handle_message(player_id, game_message, &self.broadcaster);
                 }
                 None => {
-                    connection_tx
-                        .send(ServerMessage::Error(ErrorMessage::NotInGame))
-                        .inspect_err(|e| tracing::error!(error = %e));
+                    self.broadcaster
+                        .send_to_player(&player_id, ServerMessage::Error(ErrorMessage::NotInGame));
                 }
             },
             LobbyMessage::HostMessage(host_message) => {
                 if player_id != self.host {
-                    connection_tx.send(ServerMessage::Error(ErrorMessage::InsufficientPermissions));
+                    self.broadcaster.send_to_player(
+                        &player_id,
+                        ServerMessage::Error(ErrorMessage::InsufficientPermissions),
+                    );
                     return false;
                 }
                 //
                 match host_message {
                     HostMessage::StartGame => {
                         if self.game_state.is_some() {
-                            connection_tx.send(ServerMessage::Error(ErrorMessage::AlreadyInGame));
+                            self.broadcaster.send_to_player(
+                                &player_id,
+                                ServerMessage::Error(ErrorMessage::AlreadyInGame),
+                            );
                             return false;
                         }
                         self.game_state = Some(GameState::new()); // TODO: this constructor should take in all players, and more state as well
-                        connection_tx.send(ServerMessage::GameStarted);
+                        self.broadcaster.broadcast(ServerMessage::GameStarted);
                         return false;
                     }
                     HostMessage::TransferHost(player_id) => {
                         if player_id != self.host {
                             self.host = player_id;
-                            connection_tx.send(ServerMessage::HostChanged(self.host));
+                            self.broadcaster
+                                .broadcast(ServerMessage::HostChanged(self.host));
                             return false;
                         }
                     }
                     HostMessage::SetSettings(lobby_settings) => {
                         self.settings = lobby_settings.clone();
-                        connection_tx
-                            .send(ServerMessage::LobbySettingsUpdated(lobby_settings.clone()));
-                        if let Some(game_state) = self.game_state {
-                            self.game_state.lobby_settings_updated(lobby_settings);
+                        self.broadcaster
+                            .broadcast(ServerMessage::LobbySettingsUpdated(lobby_settings.clone()));
+                        if let Some(ref mut game_state) = self.game_state {
+                            if let Some(new_active_game_settings) =
+                                game_state.lobby_settings_updated(lobby_settings)
+                            {
+                                self.broadcaster.broadcast(
+                                    ServerMessage::ActiveGameSettingsUpdated(
+                                        new_active_game_settings,
+                                    ),
+                                );
+                            }
                         }
-                        // checks if Acti should be updated,
-                        // if so call self.game_state.set_active_game_settings
-                        // as well
-                        todo!()
                     }
                     // HostMessage::AddBot => {
                     //     // TODO, not implemented
@@ -183,7 +191,8 @@ impl Lobby {
                         todo!()
                     }
                     HostMessage::CloseLobby => {
-                        self.broadcast(ServerMessage::LeftLobby(LeftLobbyReason::LobbyClosed));
+                        self.broadcaster
+                            .broadcast(ServerMessage::LeftLobby(LeftLobbyReason::LobbyClosed));
                         return true;
                     }
                 }
@@ -194,14 +203,18 @@ impl Lobby {
 
     pub fn session_offline(&mut self, session_id: SessionId) {
         let player_id = *self.player_map.get_player_id(&session_id).unwrap();
-        self.player_map.remove_tx(player_id);
-        self.broadcast(ServerMessage::PlayerOffline(player_id));
+        self.broadcaster.remove_player_tx(&player_id);
+        self.broadcaster
+            .broadcast(ServerMessage::PlayerOffline(player_id));
     }
 
     /// returns true if the lobby should end because all players left
     pub fn session_left(&mut self, session_id: SessionId, reason: LeftLobbyReason) -> bool {
         let player_id = self.player_map.remove_by_session_id(&session_id).unwrap();
-        self.broadcast(ServerMessage::PlayerLeft { player_id, reason });
+        self.broadcaster.remove_player_tx(&player_id);
+
+        self.broadcaster
+            .broadcast(ServerMessage::PlayerLeft { player_id, reason });
 
         if player_id == self.host {
             let Some(new_host) = self.player_map.players().nth(0) else {
@@ -209,10 +222,15 @@ impl Lobby {
                 return true;
             };
             self.host = *new_host;
-            self.broadcast(ServerMessage::HostChanged(self.host));
+            self.broadcaster
+                .broadcast(ServerMessage::HostChanged(self.host));
         }
 
         false
+    }
+
+    fn lobby_info(&self) -> LobbyInfo {
+        todo!()
     }
 }
 
@@ -228,16 +246,11 @@ pub struct LobbyInfo {
     current_game: Option<GameInfo>,
 }
 
-// these message types are public and should directly correspond with client messages
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub enum LobbyMessage {
     GameMessage(GameMessage),
     HostMessage(HostMessage),
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub enum HostMessage {
     StartGame,
     TransferHost(PlayerId),
@@ -298,14 +311,45 @@ impl LobbyCode {
     }
 }
 
-// the reason for why we store tx for each player in here is to support broadcasting to all players
-//
-// if the player is offline, the tx will be None
+/// stores all online players and their connection
+#[derive(Default)]
+pub struct LobbyBroadcaster {
+    player_tx: HashMap<PlayerId, ConnectionTx>,
+}
 
+impl LobbyBroadcaster {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn send_to_player(&self, player_id: &PlayerId, message: ServerMessage) {
+        self.player_tx.get(player_id).unwrap().send(message);
+    }
+
+    /// send a server message to all online players in the lobby
+    pub fn broadcast(&self, message: ServerMessage) {
+        for connection_tx in self.player_tx.values() {
+            connection_tx.send(message.clone());
+        }
+    }
+
+    /// get a player's tx
+    pub fn get_player_tx(&self, player_id: &PlayerId) -> Option<&ConnectionTx> {
+        self.player_tx.get(player_id)
+    }
+    /// if a player disconnects, remove the dead tx
+    pub fn remove_player_tx(&mut self, player_id: &PlayerId) {
+        self.player_tx.remove(player_id);
+    }
+    /// if a player reconnects, add back their tx
+    pub fn add_player_tx(&mut self, player_id: PlayerId, connection_tx: ConnectionTx) {
+        self.player_tx.insert(player_id, connection_tx);
+    }
+}
 #[derive(Default)]
 pub struct LobbyPlayers {
     session_player: HashMap<SessionId, PlayerId>,
-    player_session_tx: BTreeMap<PlayerId, (SessionId, Option<ConnectionTx>)>,
+    player_session: BTreeMap<PlayerId, SessionId>,
 }
 #[derive(Debug)]
 pub enum LobbyPlayersInsertError {
@@ -322,11 +366,10 @@ impl LobbyPlayers {
         &mut self,
         session_id: SessionId,
         player_id: PlayerId,
-        tx: ConnectionTx,
     ) -> Result<(), LobbyPlayersInsertError> {
         match (
             self.session_player.contains_key(&session_id),
-            self.player_session_tx.contains_key(&player_id),
+            self.player_session.contains_key(&player_id),
         ) {
             (true, true) => Err(LobbyPlayersInsertError::PlayerAndSessionAlreadyExists),
             (true, false) => Err(LobbyPlayersInsertError::SessionAlreadyExists),
@@ -334,49 +377,28 @@ impl LobbyPlayers {
             (false, false) => Ok(()),
         }?;
         self.session_player.insert(session_id, player_id);
-        self.player_session_tx
-            .insert(player_id, (session_id, Some(tx)));
+        self.player_session.insert(player_id, session_id);
         Ok(())
     }
     // we dont need any smarter getters by index here, since this is just the lobby. in game
     // there will be the `Players` data structure instead
     pub fn players(&self) -> impl Iterator<Item = &PlayerId> {
-        self.player_session_tx.keys()
+        self.player_session.keys()
     }
     pub fn get_player_id(&self, session_id: &SessionId) -> Option<&PlayerId> {
         self.session_player.get(session_id)
     }
-    pub fn session_tx_values(&self) -> impl Iterator<Item = &(SessionId, Option<ConnectionTx>)> {
-        self.player_session_tx.values()
+    pub fn session_tx_values(&self) -> impl Iterator<Item = &SessionId> {
+        self.player_session.values()
     }
-    pub fn get_tx(&self, player_id: &PlayerId) -> Option<Option<&ConnectionTx>> {
-        self.player_session_tx
-            .get(player_id)
-            .map(|s_t| s_t.1.as_ref())
-    }
-    /// if a player disconnects, remove the dead tx
-    pub fn remove_tx(&mut self, player_id: PlayerId) {
-        self.player_session_tx.entry(player_id).and_modify(|s_t| {
-            s_t.1 = None;
-        });
-    }
-    /// if a player reconnects, add back their tx
-    pub fn add_tx(&mut self, player_id: PlayerId, connection_tx: ConnectionTx) {
-        self.player_session_tx.entry(player_id).and_modify(|s_t| {
-            s_t.1 = Some(connection_tx);
-        });
-    }
-    pub fn remove_by_player_id(
-        &mut self,
-        player_id: &PlayerId,
-    ) -> Option<(SessionId, Option<ConnectionTx>)> {
-        let (session_id, tx) = self.player_session_tx.remove(player_id)?;
+    pub fn remove_by_player_id(&mut self, player_id: &PlayerId) -> Option<SessionId> {
+        let session_id = self.player_session.remove(player_id)?;
         self.session_player.remove(&session_id);
-        Some((session_id, tx))
+        Some(session_id)
     }
     pub fn remove_by_session_id(&mut self, session_id: &SessionId) -> Option<PlayerId> {
         let player_id = self.session_player.remove(session_id)?;
-        self.player_session_tx.remove(&player_id);
+        self.player_session.remove(&player_id);
         Some(player_id)
     }
 }

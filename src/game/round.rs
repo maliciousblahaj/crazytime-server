@@ -1,27 +1,30 @@
 use crate::{
     ServerMessage,
-    card::{Card, InputTime},
-    lobby::PlayerId,
+    card::{Card, Time},
+    game::ActiveGameSettings,
+    lobby::{LobbyBroadcaster, PlayerId},
+    rules::RuleEffect,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     sync::mpsc::SendError,
 };
-use tokio::sync::mpsc::UnboundedSender;
 
 pub struct RoundState {
     pub init_round_state: InitRoundState,
 
-    /// every move/hit that is made is pushed onto this stack
+    /// every action that is made is pushed onto this stack, to log it
     pub player_actions: Vec<PlayerAction>,
 
     /// the cards each player has revealed this round
     pub public_card_stacks: HashMap<PlayerId, Vec<Card>>,
 
-    /// the index of player_actions when it occured, and the reason
-    pub error_occured: Option<(usize, PlayerLostReason)>,
+    /// the active effects, inverse order, should be evaluated from last to first element
+    pub active_effects: Vec<RuleEffect>,
+
+    pub action_chain: ActionChain,
 }
 
 // maybe we can think of rules having RuleEffect's, where some rules only have the effect on the next move
@@ -39,40 +42,121 @@ pub struct RoundState {
 // deterministic action is, but insert a fixed move set in front of it that inverts it, and continue doing
 // this constantly (since the effect lasts forever)
 
-pub struct DeterministicMoveChain(CountInterval);
-pub struct DeterministicPlayerChain(PlayerDirection);
+pub struct MoveManager {
+    count_interval: TimeInterval,
+    // im thinking if it might be not the best idea to make this a VecDeque, maybe it should only be
+    // possible to fix one valid move in advance, where maybe we don't need this generalization. this
+    // is because it is more difficult to work with since what if a fixed move is made that reveals
+    // a card and suddenly another rule effect starts being in play. that rule effect would now need
+    // to handle the existing possiblity of a fixed chain being there
+    //
+    // the hashset is for supporting multiple possible valid moves
+    move_queue: VecDeque<HashSet<ValidPlayerMoveType>>,
+}
+impl MoveManager {
+    /// returns Some if the move was correct, and None if incorrect
+    pub fn process<'a>(
+        &mut self,
+        previous_moves: impl DoubleEndedIterator<Item = &'a ValidPlayerMoveType>,
+        player_move: InputPlayerMove,
+    ) -> Option<ValidPlayerMoveType> {
+        let Ok(player_move) = ValidPlayerMoveType::try_from(player_move) else {
+            return None;
+        };
+        if let Some(allowed_moves) = self.move_queue.pop_front() {
+            if allowed_moves.contains(&player_move) {
+                return Some(player_move);
+            } else {
+                return None;
+            }
+        }
 
-pub enum MoveChain {
-    Deterministic(DeterministicMoveChain),
-    FixedAndThen {
-        // the hashset is if there are multiple possible valid moves
-        moves: Vec<HashSet<PlayerMove>>,
-        then: DeterministicMoveChain,
-    },
+        let mut previous_time = None;
+        for prev_move in previous_moves.rev() {
+            if let Some(ValidCount::Time(time)) = prev_move.get_count() {
+                previous_time = Some(time);
+                break;
+            }
+        }
+        let expected_time = match previous_time {
+            Some(time) => time.plus(&self.count_interval),
+            None => Time::One,
+        };
+        match player_move {
+            ValidPlayerMoveType::CountAndLayCard(valid_count) => {
+                if let ValidCount::Time(time) = valid_count
+                    && time == expected_time
+                {
+                    Some(player_move)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
 }
-pub enum PlayerChain {
-    Deterministic(DeterministicPlayerChain),
-    FixedAndThen {
-        players: Vec<HashSet<PlayerId>>,
-        then: DeterministicPlayerChain,
-    },
+
+pub struct PlayerManager {
+    player_order: Vec<PlayerId>,
+    pub direction: PlayerDirection,
+    pub player_queue: VecDeque<HashSet<PlayerId>>,
 }
+
+impl PlayerManager {
+    /// returns true if the player was correct, and false if incorrect
+    pub fn process(&mut self, player: PlayerId, previous_player: &PlayerId) -> bool {
+        if let Some(allowed_players) = self.player_queue.pop_front() {
+            if allowed_players.contains(&player) {
+                return true;
+            } else {
+                return false;
+            }
+        }
+        let previous_player_idx = self
+            .player_order
+            .iter()
+            .position(|player| player == previous_player)
+            .unwrap();
+        let next_player = self.player_order[(previous_player_idx as isize + self.direction.0)
+            .rem_euclid(self.player_order.len() as isize)
+            as usize];
+        player == next_player
+    }
+}
+
+struct PreviousMoves(Vec<ValidPlayerMove>);
 
 /// The correct chain of actions in a state
 pub enum ActionChain {
     Moves {
-        move_chain: MoveChain,
-        player_chain: PlayerChain,
+        previous_moves: PreviousMoves,
+        player_manager: PlayerManager,
+        move_manager: MoveManager,
     },
     Hit {
-        players: Vec<PlayerId>,
+        // when this set becomes empty the round terminates
+        players: HashSet<PlayerId>,
         hit_type: HitType,
     },
     ReportError {
-        error_player: PlayerId,
-        first_error_occured: DateTime<Utc>,
-        chain_before_error: Box<ActionChain>,
+        errors: Vec<ActionError>,
+        chain_before_first_error: Box<ActionChain>,
     },
+}
+
+pub struct ActionError {
+    player: PlayerId,
+    reason: ErrorReason,
+    occured: DateTime<Utc>,
+}
+
+enum ErrorReason {
+    InvalidMove,
+    OutOfTurn,
+    InvalidHit,
+    InvalidHitType,
+    InvalidWinDeclaration,
 }
 
 enum ActionChainAdvancement {
@@ -101,33 +185,149 @@ enum ActionChainAdvancement {
 // rule effect can declare fields, with the fields being hardcoded, and represent it hardcoded as well,
 // and not as an effect.
 
+pub enum RoundTerminationType {
+    ErrorReported {
+        reporter: PlayerId,
+        errors: Vec<ActionError>,
+    },
+    FaultyErrorReport(PlayerId),
+    HitPileLast(PlayerId),
+}
+
+// pub enum ProcessedAction {
+//     Continue(ActionChain),
+//     Termination(RoundTerminationType),
+// }
+
 impl ActionChain {
-    // returns Some if the round terminates, with who made the most error
-    pub fn advance(&mut self, action: &PlayerAction) -> Option<PlayerId> {
-        match action.r#type {
-            PlayerActionType::Move(player_move) => {}
-            PlayerActionType::Hit(hit_type) => todo!(),
-            PlayerActionType::ReportError => match self {
-                ActionChain::ReportError {
-                    error_player,
-                    first_error_occured,
-                    chain_before_error,
-                } => Some(error_player),
-                // these should either let you go free if game settings reaction time allows it
-                // or make you the player who made the worst error
-                //
-                // and if someone makes a wrong move, the previous chain will stay as is, like that person
-                // is the one who should've made a move, so if you make a "right" move after a wrong move,
-                // even if the time has gone, your move was wrong because it wasn't that player doing their
-                // correct move, but you doing a move instead out of your turn
-                ActionChain::Moves {
-                    move_chain,
-                    player_chain,
-                } => todo!(),
-                ActionChain::Hit { players, hit_type } => todo!(),
+    // returns Some if the round terminates, with the list of people who made errors
+    pub fn process_action(
+        &mut self,
+        player_id: PlayerId,
+        settings: &ActiveGameSettings,
+        action: InputPlayerAction,
+        time: DateTime<Utc>,
+    ) -> Option<RoundTerminationType> {
+        let chain = if let ActionChain::ReportError {
+            errors,
+            chain_before_first_error,
+        } = self
+            && (time - errors.first().unwrap().occured) <= settings.expected_error_reaction_time
+        {
+            chain_before_first_error
+        } else {
+            self
+        };
+        // if i were to not take self by value, but a mut reference, i could here instead match
+        // on self first to catch the edge case of valid move after error within error reaction time,
+        // and not have to duplicate later
+        match action {
+            InputPlayerAction::Move(player_move) => {
+                if let ActionChain::Moves {
+                    previous_moves,
+                    player_manager,
+                    move_manager,
+                } = if let ActionChain::ReportError {
+                    errors,
+                    chain_before_first_error,
+                } = self
+                    && (time - errors.first().unwrap().occured)
+                        <= settings.expected_error_reaction_time
+                {
+                    *chain_before_first_error
+                } else {
+                    self
+                } {
+                    match move_manager.process(
+                        previous_moves.0.iter().map(|prev_move| &prev_move.r#type),
+                        player_move,
+                    ) {
+                        Some(valid_move_type) => {
+                            previous_moves.0.push(ValidPlayerMove {
+                                player: player_id,
+                                r#type: valid_move_type,
+                            });
+                            return ProcessedAction::Continue(self);
+                        }
+                        None => {
+                            let error = ActionError {
+                                player: player_id,
+                                reason: ErrorReason::InvalidMove,
+                                occured: time,
+                            };
+                            return ProcessedAction::Continue(Self::ReportError {
+                                errors: Vec::from([error]),
+                                chain_before_first_error: Box::new(self),
+                            });
+                        }
+                    }
+                }
+                if let ActionChain::ReportError {
+                    errors,
+                    chain_before_first_error,
+                } = self
+                {
+                    errors.push(ActionError {
+                        player: player_id,
+                        reason: ErrorReason::OutOfTurn,
+                        occured: time,
+                    });
+                    return ProcessedAction::Continue(Self::ReportError {
+                        errors,
+                        chain_before_first_error,
+                    });
+                }
+                ProcessedAction::Continue(Self::ReportError {
+                    errors: Vec::from([ActionError {
+                        player: player_id,
+                        reason: ErrorReason::OutOfTurn,
+                        occured: time,
+                    }]),
+                    chain_before_first_error: Box::new(self),
+                })
+            }
+            InputPlayerAction::Hit(ref hit_type) => {
+                let Self::Hit { players, hit_type } = self else {
+                    replace_with::replace_with_or_abort(self, |prev_self| Self::ReportError {
+                        errors: Vec::from([ActionError {
+                            player: player_id,
+                            reason: ErrorReason::InvalidHit,
+                            occured: time,
+                        }]),
+                        chain_before_first_error: Box::new(prev_self),
+                    });
+                    return None;
+                };
+
+                if !players.remove(&player_id) {
+                    replace_with::replace_with_or_abort(self, |prev_self| Self::ReportError {
+                        errors: Vec::from([ActionError {
+                            player: player_id,
+                            reason: ErrorReason::InvalidHit,
+                            occured: time,
+                        }]),
+                        chain_before_first_error: Box::new(prev_self),
+                    });
+                }
+                if players.is_empty() {
+                    // this runs only if this was the last player to hit
+                    Some(RoundTerminationType::HitPileLast(player_id))
+                } else {
+                    None
+                }
+            }
+            InputPlayerAction::ReportError => match self {
+                Self::ReportError {
+                    errors,
+                    chain_before_first_error,
+                } => Some(RoundTerminationType::ErrorReported {
+                    reporter: player_id,
+                    errors,
+                }),
+                _ => Some(RoundTerminationType::FaultyErrorReport(player_id)),
             },
             // should happen during a move where that player is ruled in turn, and also terminates
-            PlayerActionType::DeclareWin => todo!(),
+            InputPlayerAction::DeclareWin => todo!(),
         }
     }
 }
@@ -178,11 +378,15 @@ impl RoundState {
     //     None
     // }
     pub async fn handle_message(
+        &mut self,
         player: PlayerId,
         message: RoundMessage,
-        tx: UnboundedSender<ServerMessage>,
+        broadcaster: &LobbyBroadcaster,
     ) -> Result<(), SendError<ServerMessage>> {
-        Ok(())
+        match message {
+            RoundMessage::ActionPerformed(input_player_action) => todo!(),
+            RoundMessage::MoveTimeout => todo!(),
+        }
     }
 }
 
@@ -200,10 +404,10 @@ pub struct InitRoundState {
     starting_player: PlayerId,
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+//these are internal messages
 pub enum RoundMessage {
     ActionPerformed(InputPlayerAction),
+    MoveTimeout,
 }
 
 pub struct MutableRoundState<'a> {
@@ -211,7 +415,7 @@ pub struct MutableRoundState<'a> {
     pub next_count: &'a mut Count,
 
     pub direction: &'a mut PlayerDirection,
-    pub count_interval: &'a mut CountInterval,
+    pub time_interval: &'a mut TimeInterval,
 
     pub should_lay_no_card: &'a mut MoveRuleApplication,
     pub should_count_the_name_of_this_rule: &'a mut MoveRuleApplication,
@@ -222,8 +426,9 @@ pub struct MutableRoundState<'a> {
 
 /// in half an hour steps
 /// supports negative numbers for backwards counting
-pub struct CountInterval(pub isize);
-impl CountInterval {
+#[derive(Copy, Clone)]
+pub struct TimeInterval(pub isize);
+impl TimeInterval {
     pub const MINUSTWOHOURS: Self = Self(-4);
     pub const MINUSONEHOUR: Self = Self(-2);
     pub const MINUSTHIRTYMINUTES: Self = Self(-1);
@@ -236,11 +441,80 @@ impl CountInterval {
     }
 }
 
-#[derive(Clone, Copy, Serialize, Deserialize)]
+#[derive(Clone, Copy, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Count {
-    Time(InputTime),
+    Zero,
+    ZeroThirty,
+    One,
+    OneThirty,
+    Two,
+    TwoThirty,
+    Three,
+    ThreeThirty,
+    Four,
+    FourThirty,
+    Five,
+    FiveThirty,
+    Six,
+    SixThirty,
+    Seven,
+    SevenThirty,
+    Eight,
+    EightThirty,
+    Nine,
+    NineThirty,
+    Ten,
+    TenThirty,
+    Eleven,
+    ElevenThirty,
+    Twelve,
+    TwelveThirty,
+    Thirteen,
+    ThirteenThirty,
+    Fourteen,
+    FourteenThirty,
+    Fifteen,
+    FifteenThirty,
+    Sixteen,
+    SixteenThirty,
+    Seventeen,
+    SeventeenThirty,
+    Eighteen,
+    EighteenThirty,
+    Nineteen,
+    NineteenThirty,
     NameOfThisRule,
+}
+impl From<Time> for Count {
+    fn from(value: Time) -> Self {
+        match value {
+            Time::One => Self::One,
+            Time::OneThirty => Self::OneThirty,
+            Time::Two => Self::Two,
+            Time::TwoThirty => Self::TwoThirty,
+            Time::Three => Self::Three,
+            Time::ThreeThirty => Self::ThreeThirty,
+            Time::Four => Self::Four,
+            Time::FourThirty => Self::FourThirty,
+            Time::Five => Self::Five,
+            Time::FiveThirty => Self::FiveThirty,
+            Time::Six => Self::Six,
+            Time::SixThirty => Self::SixThirty,
+            Time::Seven => Self::Seven,
+            Time::SevenThirty => Self::SevenThirty,
+            Time::Eight => Self::Eight,
+            Time::EightThirty => Self::EightThirty,
+            Time::Nine => Self::Nine,
+            Time::NineThirty => Self::NineThirty,
+            Time::Ten => Self::Ten,
+            Time::TenThirty => Self::TenThirty,
+            Time::Eleven => Self::Eleven,
+            Time::ElevenThirty => Self::ElevenThirty,
+            Time::Twelve => Self::Twelve,
+            Time::TwelveThirty => Self::TwelveThirty,
+        }
+    }
 }
 
 pub struct FinishedRound {
@@ -250,6 +524,7 @@ pub struct FinishedRound {
     pub error_occured: Option<usize>,
 }
 
+// same as InputPlayerMove but with cards revealed, and broadcast capabilities
 #[derive(Clone, Copy, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum PlayerMove {
@@ -257,20 +532,86 @@ pub enum PlayerMove {
     Count(Count),
     LayCard(Card),
 }
-#[derive(Clone, Copy, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum InputPlayerMove {
-    CountAndLayCard(Count),
-    Count(Count),
-    LayCard,
-}
-#[derive(Deserialize)]
+
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum InputPlayerAction {
     Move(InputPlayerMove),
     Hit(HitType),
     ReportError,
     DeclareWin,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum InputPlayerMove {
+    CountAndLayCard(Count),
+    Count(Count),
+    LayCard,
+}
+
+pub struct ValidPlayerMove {
+    player: PlayerId,
+    r#type: ValidPlayerMoveType,
+}
+
+#[derive(PartialEq, Eq, Hash)]
+pub enum ValidPlayerMoveType {
+    CountAndLayCard(ValidCount),
+    Count(ValidCount),
+    LayCard,
+}
+impl TryFrom<InputPlayerMove> for ValidPlayerMoveType {
+    type Error = ();
+
+    fn try_from(value: InputPlayerMove) -> Result<Self, Self::Error> {
+        Ok(match value {
+            InputPlayerMove::CountAndLayCard(count) => {
+                ValidPlayerMoveType::CountAndLayCard(ValidCount::try_from(count)?)
+            }
+            InputPlayerMove::Count(count) => {
+                ValidPlayerMoveType::Count(ValidCount::try_from(count)?)
+            }
+            InputPlayerMove::LayCard => ValidPlayerMoveType::LayCard,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq, Hash)]
+pub enum ValidCount {
+    Time(Time),
+    NameOfThisRule,
+}
+
+impl TryFrom<Count> for ValidCount {
+    type Error = ();
+
+    fn try_from(value: Count) -> Result<Self, Self::Error> {
+        Ok(match value {
+            Count::NameOfThisRule => Self::NameOfThisRule,
+            other => Self::Time(Time::try_from(other)?),
+        })
+    }
+}
+
+impl ValidPlayerMoveType {
+    pub fn get_count(&self) -> Option<&ValidCount> {
+        match self {
+            Self::CountAndLayCard(count) => Some(count),
+            Self::Count(count) => Some(count),
+            Self::LayCard => None,
+        }
+    }
+}
+
+impl InputPlayerMove {
+    pub fn get_count(&self) -> Option<Count> {
+        match self {
+            InputPlayerMove::CountAndLayCard(count) => Some(*count),
+            InputPlayerMove::Count(count) => Some(*count),
+            InputPlayerMove::LayCard => None,
+        }
+    }
 }
 
 #[derive(Clone, Serialize)]
@@ -329,17 +670,16 @@ pub enum MoveRuleValidity {
     Indefinitely,
 }
 
-pub enum PlayerDirection {
-    Forward,
-    Reverse,
-}
+/// the index offset to use
+#[derive(Copy, Clone)]
+pub struct PlayerDirection(pub isize);
 
 impl PlayerDirection {
-    pub fn toggle(&mut self) {
-        *self = match self {
-            Self::Forward => Self::Reverse,
-            Self::Reverse => Self::Forward,
-        };
+    pub const FORWARD: Self = Self(1);
+    pub const REVERSE: Self = Self(-1);
+
+    pub fn toggle_direction(&mut self) {
+        self.0 = -self.0
     }
 }
 

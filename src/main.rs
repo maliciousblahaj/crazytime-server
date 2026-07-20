@@ -32,16 +32,12 @@ use tokio_util::task::JoinMap;
 
 #[derive(Clone)]
 struct AppState {
-    lobby_coordinator: JoinHandle<()>,
     lobby_coordinator_tx: UnboundedSender<LobbyCoordinatorMessage>,
 }
 
 impl AppState {
-    async fn new() -> Self {
-        let (lobby_coordinator_tx, lobby_coordinator_rx) = mpsc::unbounded_channel();
-        let lobby_coordinator = tokio::spawn(lobby_coordinator_task(lobby_coordinator_rx));
+    async fn new(lobby_coordinator_tx: UnboundedSender<LobbyCoordinatorMessage>) -> Self {
         Self {
-            lobby_coordinator,
             lobby_coordinator_tx,
         }
     }
@@ -51,7 +47,9 @@ impl AppState {
 async fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
 
-    let state = AppState::new();
+    let (lobby_coordinator_tx, lobby_coordinator_rx) = mpsc::unbounded_channel();
+    let lobby_coordinator = tokio::spawn(lobby_coordinator_task(lobby_coordinator_rx));
+    let state = AppState::new(lobby_coordinator_tx.clone());
 
     let app = Router::new()
         .route("/api", get(ws_endpoint))
@@ -65,7 +63,29 @@ async fn main() -> color_eyre::Result<()> {
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await
+    axum::serve(listener, app)
+        .with_graceful_shutdown(signal)
+        .await?;
+    lobby_coordinator_tx.send(LobbyCoordinatorMessage::ServerShutdown);
+    lobby_coordinator.await??;
+    Ok(())
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c().await.unwrap();
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(signal::unix::SignalKind::terminate())
+            .expect("failed to install signal handler")
+            .recv()
+            .await;
+    };
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -87,11 +107,13 @@ async fn ws_endpoint(
         let session_id = input.session_id;
         let (connection_tx, connection_rx) = mpsc::unbounded_channel();
 
-        let idle_duration = Duration::from_secs(20);
-        let pong_wait_duration = Duration::from_secs(10);
+        let idle_duration = Duration::from_secs(10);
+        let pong_wait_duration = Duration::from_secs(5);
         let idle_timer = sleep(idle_duration);
         tokio::pin!(idle_timer);
         let mut pong_wait_timer: Option<Pin<Box<Sleep>>> = None;
+
+        let mut sequential_message_id = 0;
 
         app_state.lobby_coordinator_tx.send(LobbyCoordinatorMessage::SessionConnected {
             session_id,
@@ -141,7 +163,8 @@ async fn ws_endpoint(
                 server_message = connection_rx.recv() => {
                     match server_message {
                         Some(message) => {
-                            let json = serde_json::to_string(&message).unwrap();
+                            let json = serde_json::to_string(ServerPacket { sequence_id: sequential_message_id, message }).unwrap();
+                            sequential_message_id += 1; // to detect lost packages
                             socket.send(ws::Message::Text(json)).await.inspect_err(|e| tracing::error!(error = %e));
                         }
                         None => {
@@ -152,4 +175,11 @@ async fn ws_endpoint(
             };
         }
     })
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerPacket {
+    sequence_id: usize,
+    message: ServerMessage,
 }

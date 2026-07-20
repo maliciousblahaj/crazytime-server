@@ -1,18 +1,19 @@
-use std::{collections::HashMap, sync::mpsc::SendError, time::Duration};
+use std::{collections::HashMap, sync::mpsc::SendError};
 
+use chrono::Duration;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{
-    ServerMessage,
+    ErrorMessage, ServerMessage,
     card::Card,
     game::{
         r#match::{
             FinishedMatch, InitMatchState, MatchInfo, MatchMessage, MatchPlayers, MatchState,
         },
-        round::{FinishedRound, InitRoundState, PlayerAction, PlayerLostReason},
+        round::{FinishedRound, InitRoundState, InputPlayerAction, PlayerAction, PlayerLostReason},
     },
-    lobby::PlayerId,
+    lobby::{LobbyBroadcaster, PlayerId},
     rules::{RuleInfo, RuleManager},
 };
 
@@ -66,14 +67,15 @@ impl Default for LobbySettings {
 }
 /// game settings within a game
 #[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ActiveGameSettings {
-    /// See [`GameSettings.expected_error_reaction_time`]
+    /// See [`LobbySettings.expected_error_reaction_time`]
     pub expected_error_reaction_time: Duration,
-    /// See [`GameSettings.cards_removed_at_correct_error_report`]
+    /// See [`LobbySettings.cards_removed_at_correct_error_report`]
     pub cards_removed_at_correct_error_report: usize,
-    /// See [`GameSettings.max_cards_picked_up_when_losing`]
+    /// See [`LobbySettings.max_cards_picked_up_when_losing`]
     pub max_cards_picked_up_when_losing: MaxCardsPickedUpWhenLosing,
-    /// See [`GameSettings.action_timeout_rate`]
+    /// See [`LobbySettings.action_timeout_rate`]
     pub action_timeout_rate: Duration,
 }
 
@@ -118,9 +120,49 @@ impl GameState {
         &mut self,
         player_id: PlayerId,
         message: GameMessage,
-        tx: UnboundedSender<ServerMessage>,
-    ) -> Result<(), SendError<ServerMessage>> {
-        Ok(())
+        broadcaster: &LobbyBroadcaster,
+    ) {
+        match message {
+            GameMessage::ActionPerformed(action) => {
+                let Some(ref mut current_match) = self.current_match else {
+                    broadcaster
+                        .send_to_player(&player_id, ServerMessage::Error(ErrorMessage::NotInMatch));
+                    return;
+                };
+                let Some(ref mut current_round) = current_match.current_round else {
+                    broadcaster
+                        .send_to_player(&player_id, ServerMessage::Error(ErrorMessage::NotInMatch));
+                    return;
+                };
+            }
+            GameMessage::MoveTimeout => todo!(),
+            GameMessage::AddNewRule => todo!(),
+            GameMessage::RemoveRule(_) => todo!(),
+        }
+        // GameMessage::MatchMessage(match_message) => {
+        //     match
+        //     if let Some(ref mut current_match) = self.current_match {
+        //         match message {
+        //             MatchMessage::RoundMessage(round_message) => {
+        //                 if let Some(ref mut current_round) = self.current_round {
+        //                     match message {
+        //                         RoundMessage::ActionPerformed(input_player_action) => todo!(),
+        //                         RoundMessage::MoveTimeout => todo!(),
+        //                     }
+        //                 } else {
+        //                     broadcaster.send_to_player(
+        //                         &player_id,
+        //                         ServerMessage::Error(ErrorMessage::NotInRound),
+        //                     );
+        //                 }
+        //             }
+        //         }
+        //         current_match.handle_message(player_id, match_message, broadcaster);
+        //     } else {
+        //         broadcaster
+        //             .send_to_player(&player_id, ServerMessage::Error(ErrorMessage::NotInMatch));
+        //     }
+        // }
     }
     pub fn lobby_settings_updated(
         &mut self,
@@ -169,6 +211,7 @@ pub struct GameContext<'a> {
 
 // fetched on request
 #[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GameInfo {
     settings: ActiveGameSettings,
     active_rules: Vec<RuleInfo>,
@@ -176,14 +219,11 @@ pub struct GameInfo {
     last_match_winner: Option<PlayerId>,
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+//these are internal messages
 pub enum GameMessage {
-    MatchMessage(MatchMessage),
-}
-
-impl GameState {
-    pub fn process_message(message: GameMessage) {
-        todo!()
-    }
+    // MatchMessage(MatchMessage),
+    ActionPerformed(InputPlayerAction),
+    MoveTimeout,
+    AddNewRule,
+    RemoveRule(usize),
 }

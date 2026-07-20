@@ -6,7 +6,9 @@ use crate::{
     game::{
         ActiveGameSettings, LobbySettings,
         r#match::InitMatchState,
-        round::{InitRoundState, PlayerActionType, PlayerLostReason},
+        round::{
+            InitRoundState, InputPlayerAction, PlayerAction, PlayerActionType, PlayerLostReason,
+        },
     },
     lobby::{LeftLobbyReason, LobbyCode, LobbyInfo, LobbyMessage, PlayerId},
     rules::Description,
@@ -22,6 +24,9 @@ pub mod session;
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ServerMessage {
+    // only sent on server termination (like ctrl+C)
+    ServerClosed,
+
     // lobby
 
     // this is provided whenever a users connects to a lobby
@@ -78,10 +83,7 @@ pub enum ServerMessage {
         // but ill just make sure to never induce this state in code.
         n_revealed_cards_picked_up: usize,
     },
-    ActionPerformed {
-        player_id: PlayerId,
-        action: PlayerActionType,
-    },
+    ActionPerformed(PlayerAction),
 
     // response
     Error(ErrorMessage),
@@ -91,8 +93,9 @@ pub enum ServerMessage {
 #[serde(rename_all = "camelCase")]
 pub enum ErrorMessage {
     NotInLobby,
-    NotInRound,
     NotInGame,
+    NotInMatch,
+    NotInRound,
     AlreadyInLobby,
     LobbyDoesNotExist,
     // if you are not host and try send host messages
@@ -107,7 +110,21 @@ pub enum ClientMessage {
     JoinLobby(LobbyCode),
     HostLobby,
     LeaveLobby,
-    LobbyMessage(LobbyMessage),
+
+    // lobby
+    StartGame,
+    TransferHost(PlayerId),
+    // not implemented
+    // AddBot,
+    KickPlayer(PlayerId),
+    CloseLobby,
+    SetSettings(LobbySettings),
+    // game
+    AddNewRule,
+    RemoveRule(usize),
+
+    // round
+    PerformAction(InputPlayerAction),
 }
 
 /// corresponds exactly to the session id of the user, used to authenticate

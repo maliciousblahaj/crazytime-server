@@ -8,7 +8,11 @@ use tokio_util::task::JoinMap;
 
 use crate::{
     ClientMessage, ErrorMessage, ServerMessage, SessionId,
-    lobby::{ConnectionTx, InternalLobbyMessage, LeftLobbyReason, LobbyCode, lobby_task},
+    game::GameMessage,
+    lobby::{
+        ConnectionTx, HostMessage, InternalLobbyMessage, LeftLobbyReason, LobbyCode, LobbyMessage,
+        lobby_task,
+    },
 };
 
 pub async fn lobby_coordinator_task(
@@ -71,8 +75,6 @@ pub async fn lobby_coordinator_task(
                                 };
                                 sender.send(InternalLobbyMessage::PlayerConnected{session_id: session_id, connection_tx: connection_tx.clone()});
                                 session_lobby_map.insert(session_id, lobby_code.clone());
-                                connection_tx.send(ServerMessage::JoinedLobby(lobby_code))
-                                        .inspect_err(|e| tracing::error!(error = %e));
                             },
                             ClientMessage::HostLobby => {
                                 if let Some(_lobby) = session_lobby_map.get(&session_id) {
@@ -93,8 +95,6 @@ pub async fn lobby_coordinator_task(
                                 active_lobbies.spawn(lobby_code.clone(), lobby_task(session_id, connection_tx.clone(), lobby_rx, remove_session_tx.clone()));
                                 lobby_senders.insert(lobby_code.clone(), lobby_tx);
                                 session_lobby_map.insert(session_id, lobby_code.clone());
-                                connection_tx.send(ServerMessage::JoinedLobby(lobby_code))
-                                        .inspect_err(|e| tracing::error!(error = %e));
                             },
                             ClientMessage::LeaveLobby => {
                                 let Some(lobby_code) = session_lobby_map.get(&session_id) else {
@@ -108,7 +108,19 @@ pub async fn lobby_coordinator_task(
                                 connection_tx.send(ServerMessage::LeftLobby(LeftLobbyReason::Left))
                                         .inspect_err(|e| tracing::error!(error = %e));
                             }
-                            ClientMessage::LobbyMessage(message) => {
+                            message => {
+                                // transfer flattened client message to lobby message
+                                let message = match message {
+                                    ClientMessage::StartGame => LobbyMessage::HostMessage(HostMessage::StartGame),
+                                    ClientMessage::TransferHost(player_id) => LobbyMessage::HostMessage(HostMessage::TransferHost(player_id)),
+                                    ClientMessage::KickPlayer(player_id) => LobbyMessage::HostMessage(HostMessage::KickPlayer(player_id)),
+                                    ClientMessage::CloseLobby => LobbyMessage::HostMessage(HostMessage::CloseLobby),
+                                    ClientMessage::SetSettings(lobby_settings) => LobbyMessage::HostMessage(HostMessage::SetSettings(lobby_settings)),
+                                    ClientMessage::PerformAction(input_player_action) => LobbyMessage::GameMessage(GameMessage::ActionPerformed(input_player_action)),
+                                    ClientMessage::AddNewRule => LobbyMessage::GameMessage(GameMessage::AddNewRule),
+                                    ClientMessage::RemoveRule(id) => LobbyMessage::GameMessage(GameMessage::RemoveRule(id)),
+                                    _ => {panic!("impossible!")}
+                                };
                                 let Some(lobby_code) = session_lobby_map.get(&session_id) else {
                                     connection_tx.send(ServerMessage::Error(ErrorMessage::NotInLobby))
                                         .inspect_err(|e| tracing::error!(error = %e));
@@ -117,8 +129,14 @@ pub async fn lobby_coordinator_task(
                                 let sender = lobby_senders.get(lobby_code).unwrap();
                                 sender.send(InternalLobbyMessage::LobbyMessage { session_id, message })
                                         .inspect_err(|e| tracing::error!(error = %e));
-                            },
+                            }
                         }
+                    }
+                    LobbyCoordinatorMessage::ServerShutdown => {
+                        for connection_tx in active_sessions.values() {
+                            connection_tx.send(ServerMessage::ServerClosed);
+                        }
+                        break 'runtime;
                     }
                 }
             }
@@ -136,4 +154,5 @@ pub enum LobbyCoordinatorMessage {
         session_id: SessionId,
         message: ClientMessage,
     },
+    ServerShutdown,
 }

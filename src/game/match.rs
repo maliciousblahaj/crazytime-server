@@ -1,10 +1,11 @@
 use crate::{
-    ServerMessage,
+    ErrorMessage, ServerMessage,
     card::{Card, CardPool},
     game::{
         PlayerId,
         round::{FinishedRound, RoundInfo, RoundMessage, RoundState},
     },
+    lobby::LobbyBroadcaster,
 };
 use serde::{Deserialize, Serialize};
 use sorted_vec::SortedVec;
@@ -18,25 +19,45 @@ pub struct MatchState {
     pub previous_rounds: Vec<FinishedRound>,
     pub current_round: Option<RoundState>,
 }
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum MatchMessage {
-    RoundMessage(RoundMessage),
-}
-
 impl MatchState {
-    pub async fn handle_message(
-        player: PlayerId,
+    pub fn handle_message(
+        &mut self,
+        player_id: PlayerId,
         message: MatchMessage,
-        tx: UnboundedSender<ServerMessage>,
-    ) -> Result<(), SendError<ServerMessage>> {
-        Ok(())
+        broadcaster: &LobbyBroadcaster,
+    ) {
+        match message {
+            MatchMessage::RoundMessage(round_message) => {
+                if let Some(ref mut current_round) = self.current_round {
+                    current_round.handle_message(player_id, round_message, broadcaster);
+                } else {
+                    broadcaster
+                        .send_to_player(&player_id, ServerMessage::Error(ErrorMessage::NotInRound));
+                }
+            }
+        }
     }
 }
 
+// #[derive(Deserialize)]
+// #[serde(rename_all = "camelCase")]
+// pub enum MatchMessage {
+//     RoundMessage(RoundMessage),
+// }
+
+// impl MatchState {
+//     pub async fn handle_message(
+//         player: PlayerId,
+//         message: MatchMessage,
+//         tx: UnboundedSender<ServerMessage>,
+//     ) -> Result<(), SendError<ServerMessage>> {
+//         Ok(())
+//     }
+// }
+
 /// is sent in LobbyInfo on request
 #[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MatchInfo {
     players: Vec<(PlayerId, usize)>,
     n_cards_in_pool: usize,
@@ -45,6 +66,7 @@ pub struct MatchInfo {
 
 /// is sent when a new match starts
 #[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct InitMatchState {
     // how many cards in their private card pile
     players: Vec<(PlayerId, usize)>,
@@ -84,6 +106,10 @@ impl MatchPlayers {
     }
 }
 
+//these are internal messages
+pub enum MatchMessage {
+    RoundMessage(RoundMessage),
+}
 // internal structs
 pub struct FinishedMatch {
     /// ordered placing, from first to last place. item 0 is the winner of the round

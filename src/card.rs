@@ -1,6 +1,8 @@
 use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
 
+use crate::game::round::{Count, TimeInterval};
+
 pub struct CardPool(Vec<Card>);
 
 impl CardPool {
@@ -310,7 +312,7 @@ pub enum ClockType {
     TimeMachine,
 }
 
-#[derive(Clone, Copy, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Time {
     One,
@@ -413,50 +415,45 @@ impl Time {
             _ => false,
         }
     }
+    pub fn plus(&self, time_interval: &TimeInterval) -> Self {
+        let index = self.get_index();
+        let new_index = (index as isize + time_interval.0).rem_euclid(24) as usize;
+        Self::ALL[new_index]
+    }
 }
 
-/// The "valid" input times a player can count
-#[derive(Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum InputTime {
-    Zero,
-    ZeroThirty,
-    One,
-    OneThirty,
-    Two,
-    TwoThirty,
-    Three,
-    ThreeThirty,
-    Four,
-    FourThirty,
-    Five,
-    FiveThirty,
-    Six,
-    SixThirty,
-    Seven,
-    SevenThirty,
-    Eight,
-    EightThirty,
-    Nine,
-    NineThirty,
-    Ten,
-    TenThirty,
-    Eleven,
-    ElevenThirty,
-    Twelve,
-    TwelveThirty,
-    Thirteen,
-    ThirteenThirty,
-    Fourteen,
-    FourteenThirty,
-    Fifteen,
-    FifteenThirty,
-    Sixteen,
-    SixteenThirty,
-    Seventeen,
-    SeventeenThirty,
-    Eighteen,
-    EighteenThirty,
-    Nineteen,
-    NineteenThirty,
+impl TryFrom<Count> for Time {
+    type Error = ();
+
+    fn try_from(value: Count) -> Result<Self, Self::Error> {
+        Ok(match value {
+            Count::One => Self::One,
+            Count::OneThirty => Self::OneThirty,
+            Count::Two => Self::Two,
+            Count::TwoThirty => Self::TwoThirty,
+            Count::Three => Self::Three,
+            Count::ThreeThirty => Self::ThreeThirty,
+            Count::Four => Self::Four,
+            Count::FourThirty => Self::FourThirty,
+            Count::Five => Self::Five,
+            Count::FiveThirty => Self::FiveThirty,
+            Count::Six => Self::Six,
+            Count::SixThirty => Self::SixThirty,
+            Count::Seven => Self::Seven,
+            Count::SevenThirty => Self::SevenThirty,
+            Count::Eight => Self::Eight,
+            Count::EightThirty => Self::EightThirty,
+            Count::Nine => Self::Nine,
+            Count::NineThirty => Self::NineThirty,
+            Count::Ten => Self::Ten,
+            Count::TenThirty => Self::TenThirty,
+            Count::Eleven => Self::Eleven,
+            Count::ElevenThirty => Self::ElevenThirty,
+            Count::Twelve => Self::Twelve,
+            Count::TwelveThirty => Self::TwelveThirty,
+            _ => {
+                return Err(());
+            }
+        })
+    }
 }
