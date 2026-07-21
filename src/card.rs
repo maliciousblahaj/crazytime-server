@@ -1,14 +1,16 @@
+use std::collections::VecDeque;
+
 use rand::seq::SliceRandom;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::game::round::{Count, TimeInterval};
 
-pub struct CardPool(Vec<Card>);
+pub struct CardPool(VecDeque<Card>);
 
 impl CardPool {
     /// with fixed card pool
     pub fn new() -> Self {
-        let mut card_pool = vec![
+        let mut card_pool = [
             // sun
             Card {
                 clock: ClockType::Sun,
@@ -265,11 +267,25 @@ impl CardPool {
         let mut rng = rand::rng();
         card_pool.shuffle(&mut rng);
 
-        Self(card_pool)
+        Self(VecDeque::from(card_pool))
     }
 
     pub fn n_cards(&self) -> usize {
         self.0.len()
+    }
+
+    pub fn add_cards(&mut self, cards: impl Iterator<Item = Card>) {
+        for card in cards {
+            self.0.push_front(card);
+        }
+    }
+
+    pub fn take_cards(&mut self, n_cards: usize) -> Vec<Card> {
+        let mut cards = Vec::new();
+        for _ in 0..n_cards.min(self.0.len()) {
+            cards.push(self.0.pop_back().unwrap());
+        }
+        cards
     }
 }
 

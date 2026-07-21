@@ -5,9 +5,10 @@ use serde::{Deserialize, Serialize};
 use crate::{
     game::{
         ActiveGameSettings, LobbySettings,
-        r#match::InitMatchState,
+        r#match::MatchInfo,
         round::{
-            InitRoundState, InputPlayerAction, PlayerAction, PlayerActionType, PlayerLostReason,
+            InputPlayerAction, PlayerAction, PlayerActionType, PlayerLostReason,
+            RoundTerminationType,
         },
     },
     lobby::{LeftLobbyReason, LobbyCode, LobbyInfo, LobbyMessage, PlayerId},
@@ -59,18 +60,14 @@ pub enum ServerMessage {
     },
 
     // match
-    MatchStarted(InitMatchState),
+    MatchStarted(MatchInfo),
     MatchEnded,
     PlayerGotRidOfCardsToPool {
         player_id: PlayerId,
         n_cards: usize,
     },
-
-    // round
-    RoundStarted(InitRoundState),
-    RoundEnded {
-        loser: PlayerId,
-        reason: PlayerLostReason,
+    PlayerPickedUpRevealedCards {
+        player_id: PlayerId,
         // i choose to not make this a Vec<Card>, even though it technically
         // is publically feasible to figure which cards are picked up out in
         // many situations. but i will make it harder by randomizing which ones
@@ -81,8 +78,14 @@ pub enum ServerMessage {
         // only problem i see with this being an usize instead of Vec<Card> is that
         // maybe the usize might be bigger than the actual amount of cards revealed,
         // but ill just make sure to never induce this state in code.
-        n_revealed_cards_picked_up: usize,
+        n_cards: usize,
     },
+
+    // round
+    RoundStarted {
+        starting_player: PlayerId,
+    },
+    RoundEnded(RoundTerminationType),
     ActionPerformed(PlayerAction),
 
     // response
@@ -96,6 +99,8 @@ pub enum ErrorMessage {
     NotInGame,
     NotInMatch,
     NotInRound,
+    // if you try to lay a card but you don't have any
+    NoCards,
     AlreadyInLobby,
     LobbyDoesNotExist,
     // if you are not host and try send host messages

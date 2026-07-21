@@ -1,17 +1,18 @@
-use std::{collections::HashMap, sync::mpsc::SendError};
+use std::collections::HashMap;
 
-use chrono::Duration;
+use chrono::{Duration, Utc};
+use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{
     ErrorMessage, ServerMessage,
     card::Card,
     game::{
-        r#match::{
-            FinishedMatch, InitMatchState, MatchInfo, MatchMessage, MatchPlayers, MatchState,
+        r#match::{MatchInfo, MatchPlayers, MatchState},
+        round::{
+            InputPlayerAction, InputPlayerMove, PlayerAction, PlayerActionType, PlayerMove,
+            RoundState, RoundTerminationType,
         },
-        round::{FinishedRound, InitRoundState, InputPlayerAction, PlayerAction, PlayerLostReason},
     },
     lobby::{LobbyBroadcaster, PlayerId},
     rules::{RuleInfo, RuleManager},
@@ -58,10 +59,10 @@ impl Default for LobbySettings {
     fn default() -> Self {
         Self {
             max_players: 10,
-            expected_error_reaction_time: Duration::from_secs(2),
+            expected_error_reaction_time: Duration::seconds(2),
             cards_removed_at_correct_error_report: 0,
             max_cards_picked_up_when_losing: MaxCardsPickedUpWhenLosing::Finite(5),
-            action_timeout_rate: Duration::from_secs(10),
+            action_timeout_rate: Duration::seconds(10),
         }
     }
 }
@@ -109,7 +110,7 @@ pub struct GameState {
     // pub players: BTreeSet<PlayerId>,
     /// all previous matches saved
     pub current_match: Option<MatchState>,
-    pub previous_matches: Vec<FinishedMatch>,
+    pub previous_matches: Vec<MatchState>,
     pub rule_manager: RuleManager,
 }
 impl GameState {
@@ -131,38 +132,114 @@ impl GameState {
                 };
                 let Some(ref mut current_round) = current_match.current_round else {
                     broadcaster
-                        .send_to_player(&player_id, ServerMessage::Error(ErrorMessage::NotInMatch));
+                        .send_to_player(&player_id, ServerMessage::Error(ErrorMessage::NotInRound));
                     return;
                 };
+                // parse the action and broadcast it
+                let time = Utc::now();
+                let player_action_type = match action {
+                    InputPlayerAction::Move(input_player_move) => {
+                        let player_move = match input_player_move {
+                            InputPlayerMove::CountAndLayCard(count) => {
+                                let Some(card) = current_match.players.take_card(&player_id) else {
+                                    broadcaster.send_to_player(
+                                        &player_id,
+                                        ServerMessage::Error(ErrorMessage::NoCards),
+                                    );
+                                    return;
+                                };
+                                PlayerMove::CountAndLayCard { card, count }
+                            }
+                            InputPlayerMove::Count(count) => PlayerMove::Count(count),
+                            InputPlayerMove::LayCard => {
+                                let Some(card) = current_match.players.take_card(&player_id) else {
+                                    broadcaster.send_to_player(
+                                        &player_id,
+                                        ServerMessage::Error(ErrorMessage::NoCards),
+                                    );
+                                    return;
+                                };
+                                PlayerMove::LayCard(card)
+                            }
+                        };
+                        PlayerActionType::Move(player_move)
+                    }
+                    InputPlayerAction::Hit(hit_type) => PlayerActionType::Hit(hit_type),
+                    InputPlayerAction::ReportError => PlayerActionType::ReportError,
+                    InputPlayerAction::DeclareWin => PlayerActionType::DeclareWin,
+                };
+                let player_action = PlayerAction {
+                    player_id,
+                    time,
+                    r#type: player_action_type,
+                };
+                current_round.player_actions.push(player_action.clone());
+                broadcaster.broadcast(ServerMessage::ActionPerformed(player_action));
+
+                // check rules and do server verification of action, and broadcast accordingly
+                if let Some(round_termination) = current_round.action_chain.process_action(
+                    player_id,
+                    action,
+                    &self.settings,
+                    &current_match.players,
+                    time,
+                ) {
+                    broadcaster.broadcast(ServerMessage::RoundEnded(round_termination.clone()));
+                    if let Some(guilty) = match round_termination {
+                        RoundTerminationType::ErrorReported { reporter, errors } => {
+                            if self.settings.cards_removed_at_correct_error_report > 0 {
+                                let cards = current_match.players.take_cards(
+                                    &reporter,
+                                    self.settings.cards_removed_at_correct_error_report,
+                                );
+                                if !cards.is_empty() {
+                                    let n_cards = cards.len();
+                                    current_match.card_pool.add_cards(cards.into_iter());
+                                    broadcaster.broadcast(
+                                        ServerMessage::PlayerGotRidOfCardsToPool {
+                                            player_id: reporter,
+                                            n_cards,
+                                        },
+                                    );
+                                }
+                            }
+                            Some(errors.last().unwrap().player)
+                        }
+                        RoundTerminationType::FaultyErrorReport(player_id) => Some(player_id),
+                        RoundTerminationType::HitPileLast(player_id) => Some(player_id),
+                        RoundTerminationType::FaultyWinDeclaration(player_id) => Some(player_id),
+                        RoundTerminationType::PlayerWonMatch(player_id) => {
+                            // make the match end
+                            None
+                        }
+                    } {
+                        let mut revealed_cards: Vec<Card> = current_round
+                            .public_card_stacks
+                            .iter()
+                            .fold(Vec::new(), |mut acc, card_stack| {
+                                acc.extend(card_stack.1);
+                                acc
+                            });
+                        revealed_cards.shuffle(&mut rand::rng());
+                        let picked_up_cards = match self.settings.max_cards_picked_up_when_losing {
+                            MaxCardsPickedUpWhenLosing::Finite(n) => {
+                                revealed_cards.split_off(revealed_cards.len().saturating_sub(n))
+                            }
+                            MaxCardsPickedUpWhenLosing::Unlimited => revealed_cards,
+                        };
+                    }
+                    // round is finished
+                    // broadcast finished round and loser
+                    // if playerwon end match as well
+                    // add to losers card pile from pool
+                    // get rid of 1 card off error reporter
+                    return;
+                }
             }
             GameMessage::MoveTimeout => todo!(),
             GameMessage::AddNewRule => todo!(),
             GameMessage::RemoveRule(_) => todo!(),
         }
-        // GameMessage::MatchMessage(match_message) => {
-        //     match
-        //     if let Some(ref mut current_match) = self.current_match {
-        //         match message {
-        //             MatchMessage::RoundMessage(round_message) => {
-        //                 if let Some(ref mut current_round) = self.current_round {
-        //                     match message {
-        //                         RoundMessage::ActionPerformed(input_player_action) => todo!(),
-        //                         RoundMessage::MoveTimeout => todo!(),
-        //                     }
-        //                 } else {
-        //                     broadcaster.send_to_player(
-        //                         &player_id,
-        //                         ServerMessage::Error(ErrorMessage::NotInRound),
-        //                     );
-        //                 }
-        //             }
-        //         }
-        //         current_match.handle_message(player_id, match_message, broadcaster);
-        //     } else {
-        //         broadcaster
-        //             .send_to_player(&player_id, ServerMessage::Error(ErrorMessage::NotInMatch));
-        //     }
-        // }
     }
     pub fn lobby_settings_updated(
         &mut self,
@@ -170,43 +247,20 @@ impl GameState {
     ) -> Option<ActiveGameSettings> {
         todo!()
     }
-    // /// can only be run during a round, else will return None
-    // pub fn rule_input(&mut self) -> Option<(GameContext, MutableRoundState)> {
-    //     let Some(match_state) = self.current_match else {
-    //         return None;
-    //     };
-    //     let Some(round_state) = match_state.current_round else {
-    //         return None;
-    //     };
-
-    //     Some((GameContext {
-    //         players: &match_state.players,
-    //         n_cards_in_pool: match_state.card_pool.n_cards(),
-    //         previous_matches: &self.previous_matches,
-    //         previous_rounds: &match_state.previous_rounds,
-    //         init_match_state: &match_state.init_match_state,
-    //         init_round_state: &round_state.init_round_state,
-    //         player_actions: &round_state.player_actions,
-    //         public_card_stacks: &round_state.public_card_stacks,
-    //         error_occured: &round_state.error_occured,
-    //     }, MutableRoundState {
-
-    //         })
-    // }
 }
+
+// criterias use this to determine whether to launch a RuleEffect,
+// and RuleEffects also use this when running
 pub struct GameContext<'a> {
     pub players: &'a MatchPlayers,
     pub n_cards_in_pool: usize,
-    pub previous_matches: &'a Vec<FinishedMatch>,
-    pub previous_rounds: &'a Vec<FinishedRound>,
-    pub init_match_state: &'a InitMatchState,
-    pub init_round_state: InitRoundState,
+    pub previous_matches: &'a Vec<MatchState>,
+    pub previous_rounds: &'a Vec<RoundState>,
+    pub round_starting_player: &'a PlayerId,
     /// every move/hit that is made is pushed onto this stack
     pub player_actions: &'a Vec<PlayerAction>,
     /// the cards each player has revealed this round
     pub public_card_stacks: &'a HashMap<PlayerId, Vec<Card>>,
-    /// the index of player_actions when it occured, and the reason
-    pub error_occured: Option<(usize, PlayerLostReason)>,
 }
 
 // fetched on request
@@ -221,7 +275,6 @@ pub struct GameInfo {
 
 //these are internal messages
 pub enum GameMessage {
-    // MatchMessage(MatchMessage),
     ActionPerformed(InputPlayerAction),
     MoveTimeout,
     AddNewRule,

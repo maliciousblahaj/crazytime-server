@@ -1,21 +1,17 @@
 use crate::{
-    ServerMessage,
     card::{Card, Time},
-    game::ActiveGameSettings,
-    lobby::{LobbyBroadcaster, PlayerId},
+    game::{ActiveGameSettings, r#match::MatchPlayers},
+    lobby::PlayerId,
     rules::RuleEffect,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::{HashMap, HashSet, VecDeque},
-    sync::mpsc::SendError,
-};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 pub struct RoundState {
-    pub init_round_state: InitRoundState,
+    pub starting_player: PlayerId,
 
-    /// every action that is made is pushed onto this stack, to log it
+    /// every action that is made is pushed onto this stack, to log it, including the terminating action
     pub player_actions: Vec<PlayerAction>,
 
     /// the cards each player has revealed this round
@@ -97,15 +93,20 @@ impl MoveManager {
     }
 }
 
-pub struct PlayerManager {
-    player_order: Vec<PlayerId>,
+pub struct TurnManager {
+    starting_player: PlayerId,
     pub direction: PlayerDirection,
     pub player_queue: VecDeque<HashSet<PlayerId>>,
 }
 
-impl PlayerManager {
+impl TurnManager {
     /// returns true if the player was correct, and false if incorrect
-    pub fn process(&mut self, player: PlayerId, previous_player: &PlayerId) -> bool {
+    pub fn process(
+        &mut self,
+        player: PlayerId,
+        previous_player: Option<&PlayerId>,
+        match_players: &MatchPlayers,
+    ) -> bool {
         if let Some(allowed_players) = self.player_queue.pop_front() {
             if allowed_players.contains(&player) {
                 return true;
@@ -113,14 +114,19 @@ impl PlayerManager {
                 return false;
             }
         }
-        let previous_player_idx = self
-            .player_order
-            .iter()
-            .position(|player| player == previous_player)
-            .unwrap();
-        let next_player = self.player_order[(previous_player_idx as isize + self.direction.0)
-            .rem_euclid(self.player_order.len() as isize)
-            as usize];
+        let next_player = if let Some(previous_player) = previous_player {
+            let previous_player_idx = match_players.get_index(previous_player).unwrap();
+
+            *match_players
+                .get(
+                    (previous_player_idx as isize + self.direction.0)
+                        .rem_euclid(match_players.len() as isize) as usize,
+                )
+                .unwrap()
+        } else {
+            self.starting_player
+        };
+
         player == next_player
     }
 }
@@ -131,7 +137,7 @@ struct PreviousMoves(Vec<ValidPlayerMove>);
 pub enum ActionChain {
     Moves {
         previous_moves: PreviousMoves,
-        player_manager: PlayerManager,
+        turn_manager: TurnManager,
         move_manager: MoveManager,
     },
     Hit {
@@ -145,15 +151,33 @@ pub enum ActionChain {
     },
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ActionError {
-    player: PlayerId,
-    reason: ErrorReason,
-    occured: DateTime<Utc>,
+    pub player: PlayerId,
+    pub reason: ErrorReason,
+    pub occured: DateTime<Utc>,
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RoundTerminationType {
+    ErrorReported {
+        reporter: PlayerId,
+        // latest error maker in this vec is the loser of the round
+        errors: Vec<ActionError>,
+    },
+    FaultyErrorReport(PlayerId),
+    HitPileLast(PlayerId),
+    FaultyWinDeclaration(PlayerId),
+    PlayerWonMatch(PlayerId),
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 enum ErrorReason {
+    MoveOutOfTurn,
     InvalidMove,
-    OutOfTurn,
     InvalidHit,
     InvalidHitType,
     InvalidWinDeclaration,
@@ -185,27 +209,28 @@ enum ActionChainAdvancement {
 // rule effect can declare fields, with the fields being hardcoded, and represent it hardcoded as well,
 // and not as an effect.
 
-pub enum RoundTerminationType {
-    ErrorReported {
-        reporter: PlayerId,
-        errors: Vec<ActionError>,
-    },
-    FaultyErrorReport(PlayerId),
-    HitPileLast(PlayerId),
+/// checks if self is ReportError and adds to its errors, else makes self ReportError
+macro_rules! bail_error {
+    ($self:expr, $error:expr) => {
+        if let Self::ReportError { errors, .. } = $self {
+            errors.push($error);
+        } else {
+            replace_with::replace_with_or_abort($self, |prev_self| Self::ReportError {
+                errors: Vec::from([$error]),
+                chain_before_first_error: Box::new(prev_self),
+            });
+        }
+    };
 }
-
-// pub enum ProcessedAction {
-//     Continue(ActionChain),
-//     Termination(RoundTerminationType),
-// }
 
 impl ActionChain {
     // returns Some if the round terminates, with the list of people who made errors
     pub fn process_action(
         &mut self,
         player_id: PlayerId,
-        settings: &ActiveGameSettings,
         action: InputPlayerAction,
+        settings: &ActiveGameSettings,
+        match_players: &MatchPlayers,
         time: DateTime<Utc>,
     ) -> Option<RoundTerminationType> {
         let chain = if let ActionChain::ReportError {
@@ -218,134 +243,165 @@ impl ActionChain {
         } else {
             self
         };
-        // if i were to not take self by value, but a mut reference, i could here instead match
-        // on self first to catch the edge case of valid move after error within error reaction time,
-        // and not have to duplicate later
         match action {
             InputPlayerAction::Move(player_move) => {
-                if let ActionChain::Moves {
-                    previous_moves,
-                    player_manager,
-                    move_manager,
-                } = if let ActionChain::ReportError {
-                    errors,
-                    chain_before_first_error,
-                } = self
-                    && (time - errors.first().unwrap().occured)
-                        <= settings.expected_error_reaction_time
-                {
-                    *chain_before_first_error
-                } else {
-                    self
-                } {
-                    match move_manager.process(
-                        previous_moves.0.iter().map(|prev_move| &prev_move.r#type),
-                        player_move,
-                    ) {
-                        Some(valid_move_type) => {
-                            previous_moves.0.push(ValidPlayerMove {
+                match chain {
+                    // input is move, ActionChain expects a move
+                    ActionChain::Moves {
+                        previous_moves,
+                        turn_manager,
+                        move_manager,
+                    } => {
+                        // validate if the player is in turn
+                        let previous_player =
+                            previous_moves.0.last().map(|prev_move| &prev_move.player);
+                        if !turn_manager.process(player_id, previous_player, match_players) {
+                            let error = ActionError {
                                 player: player_id,
-                                r#type: valid_move_type,
-                            });
-                            return ProcessedAction::Continue(self);
+                                reason: ErrorReason::MoveOutOfTurn,
+                                occured: time,
+                            };
+                            bail_error!(self, error);
+                            return None;
                         }
-                        None => {
+                        // validate if the move is correct
+                        let Some(valid_move_type) = move_manager.process(
+                            previous_moves.0.iter().map(|prev_move| &prev_move.r#type),
+                            player_move,
+                        ) else {
                             let error = ActionError {
                                 player: player_id,
                                 reason: ErrorReason::InvalidMove,
                                 occured: time,
                             };
-                            return ProcessedAction::Continue(Self::ReportError {
-                                errors: Vec::from([error]),
-                                chain_before_first_error: Box::new(self),
-                            });
-                        }
+                            bail_error!(self, error);
+                            return None;
+                        };
+                        // add the move to valid moves
+                        previous_moves.0.push(ValidPlayerMove {
+                            player: player_id,
+                            r#type: valid_move_type,
+                        });
+                    }
+                    // input is move, ActionChain expects a hit
+                    ActionChain::Hit { .. } => {
+                        let error = ActionError {
+                            player: player_id,
+                            reason: ErrorReason::MoveOutOfTurn,
+                            occured: time,
+                        };
+                        bail_error!(self, error);
+                    }
+                    // input is move, ActionChain expects a reported error, reaction time has passed
+                    ActionChain::ReportError { errors, .. } => {
+                        errors.push(ActionError {
+                            player: player_id,
+                            reason: ErrorReason::MoveOutOfTurn,
+                            occured: time,
+                        });
                     }
                 }
-                if let ActionChain::ReportError {
-                    errors,
-                    chain_before_first_error,
-                } = self
-                {
-                    errors.push(ActionError {
-                        player: player_id,
-                        reason: ErrorReason::OutOfTurn,
-                        occured: time,
-                    });
-                    return ProcessedAction::Continue(Self::ReportError {
-                        errors,
-                        chain_before_first_error,
-                    });
-                }
-                ProcessedAction::Continue(Self::ReportError {
-                    errors: Vec::from([ActionError {
-                        player: player_id,
-                        reason: ErrorReason::OutOfTurn,
-                        occured: time,
-                    }]),
-                    chain_before_first_error: Box::new(self),
-                })
+                None
             }
-            InputPlayerAction::Hit(ref hit_type) => {
-                let Self::Hit { players, hit_type } = self else {
-                    replace_with::replace_with_or_abort(self, |prev_self| Self::ReportError {
-                        errors: Vec::from([ActionError {
-                            player: player_id,
-                            reason: ErrorReason::InvalidHit,
-                            occured: time,
-                        }]),
-                        chain_before_first_error: Box::new(prev_self),
-                    });
-                    return None;
-                };
+            InputPlayerAction::Hit(input_hit_type) => {
+                match chain {
+                    // input is hit, ActionChain expects a hit
+                    ActionChain::Hit { players, hit_type } => {
+                        // validate if the player is expected to hit
+                        if !players.contains(&player_id) {
+                            let error = ActionError {
+                                player: player_id,
+                                reason: ErrorReason::InvalidHit,
+                                occured: time,
+                            };
+                            bail_error!(self, error);
+                            return None;
+                        }
+                        // validate if the hit type is correct
+                        if input_hit_type != *hit_type {
+                            let error = ActionError {
+                                player: player_id,
+                                reason: ErrorReason::InvalidHitType,
+                                occured: time,
+                            };
+                            bail_error!(self, error);
+                            return None;
+                        }
 
-                if !players.remove(&player_id) {
-                    replace_with::replace_with_or_abort(self, |prev_self| Self::ReportError {
-                        errors: Vec::from([ActionError {
+                        // i dont remove in the first step because the hit type may show to be wrong later,
+                        // and a player can "redeem" themselves later if they hit right the next time,
+                        // though they will still have made the latest error
+                        players.remove(&player_id);
+
+                        if players.is_empty() {
+                            return Some(RoundTerminationType::HitPileLast(player_id));
+                        }
+                    }
+                    // input is hit, ActionChain expects a move
+                    ActionChain::Moves { .. } => {
+                        let error = ActionError {
                             player: player_id,
                             reason: ErrorReason::InvalidHit,
                             occured: time,
-                        }]),
-                        chain_before_first_error: Box::new(prev_self),
-                    });
+                        };
+                        bail_error!(self, error);
+                    }
+                    // input is move, ActionChain expects a reported error, reaction time has passed
+                    ActionChain::ReportError { errors, .. } => {
+                        errors.push(ActionError {
+                            player: player_id,
+                            reason: ErrorReason::InvalidHit,
+                            occured: time,
+                        });
+                    }
                 }
-                if players.is_empty() {
-                    // this runs only if this was the last player to hit
-                    Some(RoundTerminationType::HitPileLast(player_id))
-                } else {
-                    None
-                }
+                None
             }
-            InputPlayerAction::ReportError => match self {
-                Self::ReportError {
-                    errors,
-                    chain_before_first_error,
-                } => Some(RoundTerminationType::ErrorReported {
-                    reporter: player_id,
-                    errors,
-                }),
-                _ => Some(RoundTerminationType::FaultyErrorReport(player_id)),
-            },
             // should happen during a move where that player is ruled in turn, and also terminates
-            InputPlayerAction::DeclareWin => todo!(),
+            // either way. check card_piles for this
+            InputPlayerAction::DeclareWin => {
+                match chain {
+                    // input is move, ActionChain expects a move
+                    ActionChain::Moves {
+                        previous_moves,
+                        turn_manager,
+                        ..
+                    } => {
+                        // validate if the player is in turn
+                        let previous_player =
+                            previous_moves.0.last().map(|prev_move| &prev_move.player);
+                        if !turn_manager.process(player_id, previous_player, match_players) {
+                            let error = ActionError {
+                                player: player_id,
+                                reason: ErrorReason::MoveOutOfTurn,
+                                occured: time,
+                            };
+                            bail_error!(self, error);
+                            return None;
+                        }
+                        // validate if the win declaration is correct
+                        if !match_players.get_hand(&player_id).unwrap().is_empty() {
+                            return Some(RoundTerminationType::FaultyWinDeclaration(player_id));
+                        } else {
+                            return Some(RoundTerminationType::PlayerWonMatch(player_id));
+                        }
+                    }
+                    // maybe update state, but definitely dont need to add this to the error pile i think
+                    _ => {
+                        return Some(RoundTerminationType::FaultyWinDeclaration(player_id));
+                    }
+                }
+            }
+            InputPlayerAction::ReportError => {
+                if let ActionChain::ReportError { errors, .. } = self {
+                    return Some(RoundTerminationType::ErrorReported {
+                        reporter: player_id,
+                        errors: errors.clone(),
+                    });
+                }
+                return Some(RoundTerminationType::FaultyErrorReport(player_id));
+            }
         }
-    }
-}
-
-pub enum NextAction {
-    Move(PlayerMove),
-    EveryoneShouldHit(HitType),
-}
-
-pub enum Players {
-    Players(Vec<PlayerId>),
-    Everyone,
-}
-
-pub trait ActiveRule {
-    // returns whether the rule stopped being active
-    fn run(player: PlayerId, expected_action: &mut PlayerActionType) -> bool {
-        todo!()
     }
 }
 
@@ -360,68 +416,14 @@ impl RoundState {
             },
         )
     }
-
-    // /// the previous card that was played, so if someone counts without laying a card
-    // /// the one before that will still be the previously played
-    // pub fn previously_played_card(&self) -> Option<Card> {
-    //     for (_, player_move) in self.player_moves.iter().rev() {
-    //         match player_move {
-    //             PlayerMove::CountAndLayCard { card, .. } => {
-    //                 return Some(*card);
-    //             }
-    //             PlayerMove::LayCard(card) => {
-    //                 return Some(*card);
-    //             }
-    //             _ => {}
-    //         }
-    //     }
-    //     None
-    // }
-    pub async fn handle_message(
-        &mut self,
-        player: PlayerId,
-        message: RoundMessage,
-        broadcaster: &LobbyBroadcaster,
-    ) -> Result<(), SendError<ServerMessage>> {
-        match message {
-            RoundMessage::ActionPerformed(input_player_action) => todo!(),
-            RoundMessage::MoveTimeout => todo!(),
-        }
-    }
 }
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RoundInfo {
-    init_state: InitRoundState,
-    latest_player_actions: Vec<(PlayerId, PlayerAction)>,
-    public_card_stacks: HashMap<PlayerId, Vec<Card>>,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct InitRoundState {
     starting_player: PlayerId,
-}
-
-//these are internal messages
-pub enum RoundMessage {
-    ActionPerformed(InputPlayerAction),
-    MoveTimeout,
-}
-
-pub struct MutableRoundState<'a> {
-    pub next_players: &'a mut PlayerId,
-    pub next_count: &'a mut Count,
-
-    pub direction: &'a mut PlayerDirection,
-    pub time_interval: &'a mut TimeInterval,
-
-    pub should_lay_no_card: &'a mut MoveRuleApplication,
-    pub should_count_the_name_of_this_rule: &'a mut MoveRuleApplication,
-    pub should_count_anything_but_the_correct_count: &'a mut MoveRuleApplication,
-
-    pub everyone_should_hit: &'a mut Option<HitType>,
+    player_actions: Vec<(PlayerId, PlayerAction)>,
+    public_card_stacks: HashMap<PlayerId, Vec<Card>>,
 }
 
 /// in half an hour steps
@@ -515,13 +517,6 @@ impl From<Time> for Count {
             Time::TwelveThirty => Self::TwelveThirty,
         }
     }
-}
-
-pub struct FinishedRound {
-    pub player_actions: Vec<(PlayerId, PlayerAction)>,
-    /// the index of player_moves in which an error occured. this is only one index,
-    /// since all moves after an error are also errors, until someone points it out
-    pub error_occured: Option<usize>,
 }
 
 // same as InputPlayerMove but with cards revealed, and broadcast capabilities
@@ -630,45 +625,6 @@ pub enum PlayerActionType {
     ReportError,
     DeclareWin,
 }
-pub struct MoveRuleApplication(Option<MoveRuleApplicationInner>);
-impl MoveRuleApplication {
-    pub fn turn_progressed(mut self) {
-        self.0 = match self.0 {
-            Some(MoveRuleApplicationInner {
-                target,
-                validity: MoveRuleValidity::Turns(n),
-            }) => {
-                if n <= 1 {
-                    None
-                } else {
-                    Some(MoveRuleApplicationInner {
-                        target,
-                        validity: MoveRuleValidity::Turns(n - 1),
-                    })
-                }
-            }
-            other => other,
-        }
-    }
-}
-/// discussion: so this allows for certain states, like a rule applying to all players
-/// indefinitely, or for a group of players indefinitely, or a rule applying to everyone
-/// for n turns, or a rule applying for a group of players for n turns, i think this all
-/// makes sense. just make sure to modify validity as turns progress.
-pub struct MoveRuleApplicationInner {
-    target: MoveRuleTarget,
-    validity: MoveRuleValidity,
-}
-/// who a rule is applied on
-pub enum MoveRuleTarget {
-    Players(Vec<PlayerId>),
-    Everyone,
-}
-/// how long a rule is applied for
-pub enum MoveRuleValidity {
-    Turns(usize),
-    Indefinitely,
-}
 
 /// the index offset to use
 #[derive(Copy, Clone)]
@@ -683,7 +639,7 @@ impl PlayerDirection {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Copy, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub enum HitType {
     // hit with right hand
@@ -692,19 +648,4 @@ pub enum HitType {
     Double,
     // hit with right hand upside down
     UpsideDown,
-}
-
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub enum PlayerLostReason {
-    // if you report a move that was valid
-    FaultyErrorReport,
-    // if a player calls you out on doing an incorrect move
-    IncorrectMove,
-    // if you hit last on a pile where it you were supposed to not hit
-    FaultyHitLast,
-    HitLast,
-    // this error takes priority over hitting last, because one cannot be expected
-    // to react so quickly over a wrong hit type
-    WrongHitType(HitType),
 }

@@ -1,16 +1,17 @@
 use crate::{
     card::{ClockType, Time},
     game::{
+        GameContext,
         r#match::MatchState,
-        round::{ActionChain, HitType, MutableRoundState, PlayerAction},
+        round::{ActionChain, HitType, PlayerAction},
     },
 };
 use rand::seq::SliceRandom;
 use serde::Serialize;
 
-pub type CriteriaFn = Box<dyn Fn(&MatchState) -> bool + Send>;
+pub type CriteriaFn = Box<dyn Fn(&GameContext) -> bool + Send>;
 
-pub type RuleEffect = Box<dyn Fn(ActionChain, &MatchState) -> ActionChain + Send>;
+pub type RuleEffect = Box<dyn Fn(ActionChain, &GameContext) -> ActionChain + Send>;
 
 pub struct Criteria {
     description: Description,
@@ -58,25 +59,16 @@ impl RuleManager {
                     description: Description::new(
                         "When the current player says the same time as the card they revealed",
                     ),
-                    handler: Box::new(|match_state: &MatchState| {
-                        // ok so this is absolute chaos. obviously we need to make it so criterias will only be checked after
-                        // a proper valid player move, and give it in its constructor in some way, not do match_state.current_move()
-                        // or maybe do such a method, but it would need so many unwraps and unnecessary panic conditions, like
-                        // if there was an action since. But the state machine will guarantee that directly as a move is made,
-                        // the rules will run. maybe just pass the made move as a separate argument, and don't add the move to the
-                        // match state before running the actual rules, to avoid duplication. or just do match_state.get_last_move()
-                        if let Some(round_state) = match_state.current_round {
-                            match round_state.player_actions.last() {
-                                Some(PlayerAction {
-                                    player_id,
-                                    time,
-                                    r#type,
-                                }) => todo!(),
-                                None => todo!(),
-                            }
-                        } else {
-                            false
-                        }
+                    handler: Box::new(|game_ctx: &GameContext| {
+                        // match round_state.player_actions.last() {
+                        //     Some(PlayerAction {
+                        //         player_id,
+                        //         time,
+                        //         r#type,
+                        //     }) => todo!(),
+                        //     None => todo!(),
+                        // }
+                        false
                     }),
                 },
                 Rule {

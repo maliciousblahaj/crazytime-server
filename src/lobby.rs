@@ -185,7 +185,7 @@ impl Lobby {
                     // HostMessage::AddBot => {
                     //     // TODO, not implemented
                     // }
-                    HostMessage::KickPlayer(player_id) => {
+                    HostMessage::KickPlayer(_player_id) => {
                         // check if player in game or match, if so call
                         // self.game_state.remove_player or the corresponding match variant
                         todo!()

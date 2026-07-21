@@ -1,61 +1,21 @@
 use crate::{
-    ErrorMessage, ServerMessage,
     card::{Card, CardPool},
     game::{
         PlayerId,
-        round::{FinishedRound, RoundInfo, RoundMessage, RoundState},
+        round::{RoundInfo, RoundState},
     },
-    lobby::LobbyBroadcaster,
 };
-use serde::{Deserialize, Serialize};
-use sorted_vec::SortedVec;
-use std::{collections::HashMap, sync::mpsc::SendError};
-use tokio::sync::mpsc::UnboundedSender;
+use serde::Serialize;
+use std::collections::HashMap;
 
 pub struct MatchState {
-    pub init_match_state: InitMatchState,
     pub card_pool: CardPool,
     pub players: MatchPlayers,
-    pub previous_rounds: Vec<FinishedRound>,
+    pub previous_rounds: Vec<RoundState>,
     pub current_round: Option<RoundState>,
 }
-impl MatchState {
-    pub fn handle_message(
-        &mut self,
-        player_id: PlayerId,
-        message: MatchMessage,
-        broadcaster: &LobbyBroadcaster,
-    ) {
-        match message {
-            MatchMessage::RoundMessage(round_message) => {
-                if let Some(ref mut current_round) = self.current_round {
-                    current_round.handle_message(player_id, round_message, broadcaster);
-                } else {
-                    broadcaster
-                        .send_to_player(&player_id, ServerMessage::Error(ErrorMessage::NotInRound));
-                }
-            }
-        }
-    }
-}
 
-// #[derive(Deserialize)]
-// #[serde(rename_all = "camelCase")]
-// pub enum MatchMessage {
-//     RoundMessage(RoundMessage),
-// }
-
-// impl MatchState {
-//     pub async fn handle_message(
-//         player: PlayerId,
-//         message: MatchMessage,
-//         tx: UnboundedSender<ServerMessage>,
-//     ) -> Result<(), SendError<ServerMessage>> {
-//         Ok(())
-//     }
-// }
-
-/// is sent in LobbyInfo on request
+/// is sent when a new match starts, or a connection is aquired to a lobby with an existing match
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MatchInfo {
@@ -64,21 +24,10 @@ pub struct MatchInfo {
     current_round: Option<RoundInfo>,
 }
 
-/// is sent when a new match starts
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct InitMatchState {
-    // how many cards in their private card pile
-    players: Vec<(PlayerId, usize)>,
-    n_cards_in_pool: usize,
-}
-
-/// A set of all players in a match, including their card hands,
-/// with O(1) index->player lookup, O(logN) player->index lookup,
-/// O(N) insertion, and uniqueness constraint
 #[derive(Default)]
 pub struct MatchPlayers {
-    index: SortedVec<PlayerId>,
+    /// all match players in order
+    players: Vec<PlayerId>,
     hands: HashMap<PlayerId, Vec<Card>>,
 }
 
@@ -86,36 +35,53 @@ impl MatchPlayers {
     pub fn new() -> Self {
         Self::default()
     }
+
+    pub fn len(&self) -> usize {
+        self.players.len()
+    }
+
+    pub fn get(&self, index: usize) -> Option<&PlayerId> {
+        self.players.get(index)
+    }
+
+    pub fn get_hand(&self, player: &PlayerId) -> Option<&Vec<Card>> {
+        self.hands.get(player)
+    }
+
+    /// take a card from highest up in their card stack
+    pub fn take_card(&mut self, player: &PlayerId) -> Option<Card> {
+        self.hands.get_mut(player).unwrap().pop()
+    }
+
+    /// take n cards from highest up in their card stack. If not enough cards exist, the ones that do still are retrieved
+    pub fn take_cards(&mut self, player: &PlayerId, n_cards: usize) -> Vec<Card> {
+        let card_pile = self.hands.get_mut(player).unwrap();
+        let mut cards = Vec::new();
+        for _ in 0..n_cards.min(card_pile.len()) {
+            cards.push(card_pile.pop().unwrap());
+        }
+        cards
+    }
+
     /// returns (false, index) if the player already exists at a certain index,
     /// else (true, index) if the player was just inserted at a certain index.
     pub fn add_player(&mut self, player: PlayerId, hand: Vec<Card>) -> (bool, usize) {
-        match self.index.find_or_insert(player) {
-            sorted_vec::FindOrInsert::Found(index) => (false, index),
-            sorted_vec::FindOrInsert::Inserted(index) => {
-                self.hands.insert(player, hand);
-                (true, index)
-            }
+        if let Some(index) = self.players.iter().position(|i_player| *i_player == player) {
+            return (false, index);
         }
+        self.players.push(player);
+        self.hands.insert(player, hand);
+        (true, self.players.len() - 1)
     }
     /// returns their card hands if the player was removed, and None if they
     /// don't exist in the set
     pub fn remove_player(&mut self, player: &PlayerId) -> Option<Vec<Card>> {
-        self.index
-            .remove_item(player)
-            .map(|player| self.hands.remove(&player).unwrap())
+        self.players.retain(|i_player| i_player != player);
+        self.hands.remove(&player)
     }
-}
 
-//these are internal messages
-pub enum MatchMessage {
-    RoundMessage(RoundMessage),
-}
-// internal structs
-pub struct FinishedMatch {
-    /// ordered placing, from first to last place. item 0 is the winner of the round
-    /// contains all players, and therefore a players field is redundant
-    pub placings: Vec<PlayerId>,
-    ///
-    pub card_pool: CardPool,
-    pub rounds: Vec<FinishedRound>,
+    /// get the index of a player
+    pub fn get_index(&self, player: &PlayerId) -> Option<usize> {
+        self.players.iter().position(|i_player| i_player == player)
+    }
 }
