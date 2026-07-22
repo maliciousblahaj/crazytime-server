@@ -17,7 +17,7 @@ use crate::{
         },
     },
     lobby::{AutoMessage, InternalLobbyMessage, LobbyBroadcaster, PlayerId},
-    rules::{RuleEffectDuration, RuleInfo, RuleManager},
+    rules::{RuleInfo, RuleManager},
 };
 
 pub mod r#match;
@@ -254,7 +254,7 @@ impl GameState {
                     time,
                 ) {
                     let revealed_card_stacks = current_round.revealed_card_stacks.clone();
-                    current_round.round_termination = Some(round_termination);
+                    current_round.round_termination = Some(round_termination.clone());
                     current_match
                         .previous_rounds
                         .push(current_match.current_round.take().unwrap());

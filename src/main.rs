@@ -38,8 +38,8 @@ async fn main() -> color_eyre::Result<()> {
     let state = AppState::new(lobby_coordinator_tx.clone());
 
     let app = Router::new()
-        .route("/api", get(ws_endpoint))
-        .route("/get_token", get(get_token_endpoint))
+        .route("/", get(ws_endpoint))
+        .route("/generate_token", get(generate_token_endpoint))
         .with_state(state);
 
     let port: u16 = std::env::var("CRAZYTIME_PORT")
@@ -85,7 +85,7 @@ struct WsAuthForm {
     session_id: SessionId,
 }
 
-async fn get_token_endpoint() -> impl IntoResponse {
+async fn generate_token_endpoint() -> impl IntoResponse {
     SessionId::new().to_string()
 }
 
