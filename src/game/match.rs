@@ -50,10 +50,6 @@ impl MatchState {
             current_round: self.current_round.as_ref().map(|round| round.info()),
         }
     }
-
-    pub fn handle_action_timeout(&self) {
-        todo!()
-    }
 }
 
 /// is sent when a new match starts, or a connection is aquired to a lobby with an existing match
@@ -86,6 +82,10 @@ impl MatchPlayers {
             players: hands.keys().copied().collect(),
             hands,
         }
+    }
+
+    pub fn get_player_vec(&self) -> &Vec<PlayerId> {
+        &self.players
     }
 
     pub fn get(&self, index: usize) -> Option<&PlayerId> {

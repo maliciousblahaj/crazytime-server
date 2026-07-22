@@ -1,8 +1,10 @@
+use std::{collections::BTreeMap, sync::Arc};
+
 use crate::{
     card::{Card, ClockType, Time},
     game::{
         GameContext,
-        round::{ActionChain, ActionChainMoves, HitType},
+        round::{ActionChain, ActionChainMoves, HitType, ValidCount, ValidInputPlayerMoveType},
     },
 };
 use rand::seq::SliceRandom;
@@ -10,20 +12,55 @@ use serde::Serialize;
 
 pub type CriteriaFn = Box<dyn Fn(&GameContext) -> bool + Send>;
 
-pub type RuleEffect = Box<dyn Fn(ActionChainMoves, &GameContext) -> ActionChain + Send>;
-
 pub struct Criteria {
     description: Description,
     handler: CriteriaFn,
 }
+
+pub type RuleEffectFn = Arc<dyn Fn(ActionChainMoves, &GameContext) -> ActionChain + Send + Sync>;
+
+#[derive(Clone)]
+pub struct RuleEffect {
+    pub handler: RuleEffectFn,
+    pub duration: RuleEffectDuration,
+}
+
+impl RuleEffect {
+    pub fn new(handler: RuleEffectFn, duration: RuleEffectDuration) -> Self {
+        Self { handler, duration }
+    }
+}
+
+#[derive(Clone)]
+pub enum RuleEffectDuration {
+    RestOfRound,
+    NTimes(usize),
+}
+
+impl RuleEffectDuration {
+    pub const ONCE: Self = Self::NTimes(1);
+
+    /// returns true if it has reached zero
+    pub fn decrease(&mut self) -> bool {
+        if let RuleEffectDuration::NTimes(n) = self {
+            *n -= 1;
+            if *n == 0 {
+                return true;
+            }
+        }
+        false
+    }
+}
+
 pub struct Rule {
     description: Description,
-    handler: RuleEffect,
+    effect: RuleEffect,
 }
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuleInfo {
+    id: usize,
     rule: Description,
     criteria: Description,
 }
@@ -44,7 +81,8 @@ impl Description {
 }
 
 pub struct RuleManager {
-    game_rules: Vec<(Criteria, Rule)>,
+    game_rules: BTreeMap<usize, (Criteria, Rule)>,
+    next_game_rule_id: usize,
     // these are for selecting new active rules from
     criteria_pool: Vec<Criteria>,
     rule_pool: Vec<Rule>,
@@ -52,7 +90,8 @@ pub struct RuleManager {
 
 impl RuleManager {
     pub fn new() -> Self {
-        let game_rules: Vec<(Criteria, Rule)> = vec![
+        let mut game_rules: BTreeMap<usize, (Criteria, Rule)> = BTreeMap::new();
+        game_rules.insert(0,
             (
                 Criteria {
                     description: Description::new(
@@ -61,7 +100,7 @@ impl RuleManager {
                     handler: Box::new(|game_ctx: &GameContext| {
                         if let Some(count) = game_ctx.get_just_said_count()
                             && let Some(Card { time, .. }) = game_ctx.get_just_revealed_card()
-                            && TryInto::<Time>::try_into(count).is_ok_and(|count| count == *time)
+                            && TryInto::<Time>::try_into(&count).is_ok_and(|count| count == time)
                         {
                             true
                         } else {
@@ -73,18 +112,23 @@ impl RuleManager {
                     description: Description::new(
                         "everyone should hit in the middle with one hand. the latest player loses the round",
                     ),
-                    handler: Box::new(|_, game_ctx: &GameContext| ActionChain::Hit {
-                        players: game_ctx.players.iter().copied().collect(),
-                        hit_type: HitType::Single,
-                    }),
+                    effect: RuleEffect::new(
+                        Arc::new(|_, game_ctx: &GameContext| ActionChain::Hit {
+                            players: game_ctx.players.iter().copied().collect(),
+                            hit_type: HitType::Single,
+                        }),
+                        RuleEffectDuration::ONCE,
+                    ),
                 },
-            ),
+            ));
+        game_rules.insert(
+            1,
             (
                 Criteria {
                     description: Description::new("When the revealed card is of type TimeMachine"),
                     handler: Box::new(|game_ctx: &GameContext| {
                         if let Some(Card { clock, .. }) = game_ctx.get_just_revealed_card()
-                            && *clock == ClockType::TimeMachine
+                            && clock == ClockType::TimeMachine
                         {
                             true
                         } else {
@@ -94,24 +138,27 @@ impl RuleManager {
                 },
                 Rule {
                     description: Description::new("from now on the count direction should reverse"),
-                    handler: Box::new(|action_chain_moves: ActionChainMoves, _| {
-                        let mut move_manager = action_chain_moves.move_manager;
-                        move_manager.count_interval.toggle_direction();
-                        ActionChain::Moves {
-                            previous_moves: action_chain_moves.previous_moves,
-                            turn_manager: action_chain_moves.turn_manager,
-                            move_manager,
-                        }
-                    }),
+                    effect: RuleEffect::new(
+                        Arc::new(|action_chain_moves: ActionChainMoves, _| {
+                            let mut move_manager = action_chain_moves.move_manager;
+                            move_manager.count_interval.toggle_direction();
+                            ActionChain::Moves {
+                                previous_moves: action_chain_moves.previous_moves,
+                                turn_manager: action_chain_moves.turn_manager,
+                                move_manager,
+                            }
+                        }),
+                        RuleEffectDuration::ONCE,
+                    ),
                 },
             ),
-        ];
+        );
         let mut criteria_pool: Vec<Criteria> = vec![
             Criteria {
                 description: Description::new("When the revealed card is of type Atomic"),
                 handler: Box::new(|game_ctx: &GameContext| {
                     if let Some(Card { clock, .. }) = game_ctx.get_just_revealed_card()
-                        && *clock == ClockType::Atomic
+                        && clock == ClockType::Atomic
                     {
                         true
                     } else {
@@ -123,7 +170,7 @@ impl RuleManager {
                 description: Description::new("When the revealed card is of type Watch"),
                 handler: Box::new(|game_ctx: &GameContext| {
                     if let Some(Card { clock, .. }) = game_ctx.get_just_revealed_card()
-                        && *clock == ClockType::Watch
+                        && clock == ClockType::Watch
                     {
                         true
                     } else {
@@ -135,7 +182,7 @@ impl RuleManager {
                 description: Description::new("When the revealed card is of type Hourglass"),
                 handler: Box::new(|game_ctx: &GameContext| {
                     if let Some(Card { clock, .. }) = game_ctx.get_just_revealed_card()
-                        && *clock == ClockType::Hourglass
+                        && clock == ClockType::Hourglass
                     {
                         true
                     } else {
@@ -147,7 +194,7 @@ impl RuleManager {
                 description: Description::new("When the revealed card is of type Sun"),
                 handler: Box::new(|game_ctx: &GameContext| {
                     if let Some(Card { clock, .. }) = game_ctx.get_just_revealed_card()
-                        && *clock == ClockType::Sun
+                        && clock == ClockType::Sun
                     {
                         true
                     } else {
@@ -159,7 +206,7 @@ impl RuleManager {
                 description: Description::new("When the revealed card is of type Chinese"),
                 handler: Box::new(|game_ctx: &GameContext| {
                     if let Some(Card { clock, .. }) = game_ctx.get_just_revealed_card()
-                        && *clock == ClockType::Chinese
+                        && clock == ClockType::Chinese
                     {
                         true
                     } else {
@@ -171,7 +218,7 @@ impl RuleManager {
                 description: Description::new("When the revealed card is of type Yellow"),
                 handler: Box::new(|game_ctx: &GameContext| {
                     if let Some(Card { clock, .. }) = game_ctx.get_just_revealed_card()
-                        && *clock == ClockType::Yellow
+                        && clock == ClockType::Yellow
                     {
                         true
                     } else {
@@ -183,7 +230,7 @@ impl RuleManager {
                 description: Description::new("When the revealed card is of type Purple"),
                 handler: Box::new(|game_ctx: &GameContext| {
                     if let Some(Card { clock, .. }) = game_ctx.get_just_revealed_card()
-                        && *clock == ClockType::Purple
+                        && clock == ClockType::Purple
                     {
                         true
                     } else {
@@ -195,7 +242,7 @@ impl RuleManager {
                 description: Description::new("When the revealed cards shows 01:00"),
                 handler: Box::new(|game_ctx: &GameContext| {
                     if let Some(Card { time, .. }) = game_ctx.get_just_revealed_card()
-                        && *time == Time::One
+                        && time == Time::One
                     {
                         true
                     } else {
@@ -207,7 +254,7 @@ impl RuleManager {
                 description: Description::new("When the revealed cards shows 02:00"),
                 handler: Box::new(|game_ctx: &GameContext| {
                     if let Some(Card { time, .. }) = game_ctx.get_just_revealed_card()
-                        && *time == Time::Two
+                        && time == Time::Two
                     {
                         true
                     } else {
@@ -219,7 +266,7 @@ impl RuleManager {
                 description: Description::new("When the revealed cards shows 04:00"),
                 handler: Box::new(|game_ctx: &GameContext| {
                     if let Some(Card { time, .. }) = game_ctx.get_just_revealed_card()
-                        && *time == Time::Four
+                        && time == Time::Four
                     {
                         true
                     } else {
@@ -231,7 +278,7 @@ impl RuleManager {
                 description: Description::new("When the revealed cards shows 05:00"),
                 handler: Box::new(|game_ctx: &GameContext| {
                     if let Some(Card { time, .. }) = game_ctx.get_just_revealed_card()
-                        && *time == Time::Five
+                        && time == Time::Five
                     {
                         true
                     } else {
@@ -243,7 +290,7 @@ impl RuleManager {
                 description: Description::new("When the revealed cards shows 07:00"),
                 handler: Box::new(|game_ctx: &GameContext| {
                     if let Some(Card { time, .. }) = game_ctx.get_just_revealed_card()
-                        && *time == Time::Seven
+                        && time == Time::Seven
                     {
                         true
                     } else {
@@ -255,7 +302,7 @@ impl RuleManager {
                 description: Description::new("When the revealed cards shows 11:00"),
                 handler: Box::new(|game_ctx: &GameContext| {
                     if let Some(Card { time, .. }) = game_ctx.get_just_revealed_card()
-                        && *time == Time::Eleven
+                        && time == Time::Eleven
                     {
                         true
                     } else {
@@ -267,7 +314,7 @@ impl RuleManager {
                 description: Description::new("When the revealed cards shows 12:00"),
                 handler: Box::new(|game_ctx: &GameContext| {
                     if let Some(Card { time, .. }) = game_ctx.get_just_revealed_card()
-                        && *time == Time::Twelve
+                        && time == Time::Twelve
                     {
                         true
                     } else {
@@ -292,13 +339,13 @@ impl RuleManager {
                     "When the revealed card has the same time as the previously revealed card",
                 ),
                 handler: Box::new(|game_ctx: &GameContext| {
-                    todo!()
-                    // match_state
-                    //     .previously_played_card
-                    //     .as_ref()
-                    //     .is_some_and(|previous_card| {
-                    //         match_state.current_move.card.time == previous_card.time
-                    //     })
+                    if let Some(last_cards) = game_ctx.get_n_previous_cards(2)
+                        && last_cards[0].time == last_cards[1].time
+                    {
+                        true
+                    } else {
+                        false
+                    }
                 }),
             },
             Criteria {
@@ -320,47 +367,133 @@ impl RuleManager {
                     "When the revealed card has the same clock as the previously revealed card",
                 ),
                 handler: Box::new(|game_ctx: &GameContext| {
-                    todo!()
-                    // match_state
-                    //     .previously_played_card
-                    //     .as_ref()
-                    //     .is_some_and(|previous_card| {
-                    //         match_state.current_move.card.clock == previous_card.clock
-                    //     })
+                    if let Some(last_cards) = game_ctx.get_n_previous_cards(2)
+                        && last_cards[0].clock == last_cards[1].clock
+                    {
+                        true
+                    } else {
+                        false
+                    }
                 }),
             },
         ];
-        let mut rule_pool: Vec<Rule> = vec![
-            // Rule {
-            //     description: Description::new("next player counts 1"),
-            //     handler: Box::new(|round_state: &mut MutableRoundState, _| {
-            //         round_state.next_count = Time::One;
-            //     }),
-            // },
-            // Rule {
-            //     description: Description::new("next player is skipped"),
-            //     handler: Box::new(
-            //         |round_state: &mut MutableRoundState, match_state: &MatchState| {
-            //             round_state.next_player_index = match round_state.direction {
-            //                 TurnDirection::Forward => {
-            //                     (match_state.current_player_index + 2) % match_state.n_players
-            //                 }
-            //                 TurnDirection::Reverse => {
-            //                     (match_state.n_players + match_state.current_player_index - 2)
-            //                         % match_state.n_players
-            //                 }
-            //             };
-            //         },
-            //     ),
-            // },
+        let mut rule_pool: Vec<Rule> = Vec::from([
+            // todo make this the vec macro again, just doing this for better lsp support
+            Rule {
+                description: Description::new("next player should count 01:00"),
+                effect: RuleEffect::new(
+                    Arc::new(
+                        |ActionChainMoves {
+                             previous_moves,
+                             turn_manager,
+                             mut move_manager,
+                         },
+                         _| {
+                            move_manager.set_next_move(ValidInputPlayerMoveType::CountAndLayCard(
+                                ValidCount::Time(Time::One),
+                            ));
+                            ActionChain::Moves {
+                                previous_moves,
+                                turn_manager,
+                                move_manager,
+                            }
+                        },
+                    ),
+                    RuleEffectDuration::ONCE,
+                ),
+            },
+            Rule {
+                description: Description::new("next player is skipped in turn"),
+                effect: RuleEffect::new(
+                    Arc::new(
+                        |ActionChainMoves {
+                             previous_moves,
+                             mut turn_manager,
+                             move_manager,
+                         },
+                         game_ctx| {
+                            let current_player = game_ctx.previous_moves.last().unwrap().0;
+                            let current_index = game_ctx
+                                .players
+                                .iter()
+                                .position(|plr| *plr == current_player)
+                                .unwrap();
+                            let new_index = (current_index as isize + 2 * turn_manager.direction.0)
+                                .rem_euclid(game_ctx.players.len() as isize);
+
+                            turn_manager.set_next_player(game_ctx.players[new_index as usize]);
+
+                            ActionChain::Moves {
+                                previous_moves,
+                                turn_manager,
+                                move_manager,
+                            }
+                        },
+                    ),
+                    RuleEffectDuration::ONCE,
+                ),
+            },
+            Rule {
+                description: Description::new(
+                    "next player should count the same time as the current player just did",
+                ),
+                effect: RuleEffect::new(
+                    Arc::new(
+                        |ActionChainMoves {
+                             previous_moves,
+                             turn_manager,
+                             mut move_manager,
+                         },
+                         game_ctx| {
+                            if let Some(last_count) = game_ctx.get_just_said_count() {
+                                move_manager.set_next_move(
+                                    ValidInputPlayerMoveType::CountAndLayCard(
+                                        ValidCount::try_from(last_count).unwrap(),
+                                    ),
+                                );
+                            } else {
+                                move_manager.set_next_move(ValidInputPlayerMoveType::LayCard);
+                            }
+                            ActionChain::Moves {
+                                previous_moves,
+                                turn_manager,
+                                move_manager,
+                            }
+                        },
+                    ),
+                    RuleEffectDuration::ONCE,
+                ),
+            },
             // Rule {
             //     description: Description::new(
-            //         "next player counts the same time as the last player just did",
+            //         "next player should count the highest/latest time seen on the currently visible revealed cards",
             //     ),
-            //     handler: Box::new(
-            //         |round_state: &mut MutableRoundState, match_state: &MatchState| {
-            //             round_state.next_count = match_state.current_move.count;
-            //         },
+            //     effect: RuleEffect::new(
+            //         Arc::new(
+            //             |ActionChainMoves {
+            //                  previous_moves,
+            //                  turn_manager,
+            //                  mut move_manager,
+            //              },
+            //              game_ctx| {
+            //                 // for cards in game_ctx.revealed_card_stacks.iter().map(||)
+            //                 // if let Some(last_count) = game_ctx.get_just_said_count() {
+            //                 //     move_manager.set_next_move(
+            //                 //         ValidInputPlayerMoveType::CountAndLayCard(
+            //                 //             ValidCount::try_from(last_count).unwrap(),
+            //                 //         ),
+            //                 //     );
+            //                 // } else {
+            //                 //     move_manager.set_next_move(ValidInputPlayerMoveType::LayCard);
+            //                 // }
+            //                 // ActionChain::Moves {
+            //                 //     previous_moves,
+            //                 //     turn_manager,
+            //                 //     move_manager,
+            //                 // }
+            //             },
+            //         ),
+            //         RuleEffectDuration::ONCE,
             //     ),
             // },
             // Rule {
@@ -522,7 +655,7 @@ impl RuleManager {
             // //     ),
             // //     handler: Box::new(|round_state: &mut MutableRoundState, _| {}),
             // // },
-        ];
+        ]);
 
         let mut rng = rand::rng();
         criteria_pool.shuffle(&mut rng);
@@ -530,31 +663,30 @@ impl RuleManager {
 
         Self {
             game_rules,
+            next_game_rule_id: 2,
             criteria_pool,
             rule_pool,
         }
     }
 
-    // /// run all rules
-    // pub fn run_rules(&self, match_state: &MatchState, round_state: &mut MutableRoundState) {
-    //     let mut rule_to_run = None;
-    //     for (criteria, rule) in self
-    //         .active_rules
-    //         .iter()
-    //         .map(|(criteria, rule)| (&criteria.handler, &rule.handler))
-    //     {
-    //         if criteria(match_state) {
-    //             if rule_to_run.is_some() {
-    //                 // double rule, no rules apply
-    //                 return;
-    //             }
-    //             rule_to_run = Some(rule);
-    //         }
-    //     }
-    //     if let Some(rule) = rule_to_run {
-    //         rule(round_state, match_state);
-    //     }
-    // }
+    pub fn get_new_active_effect(&self, game_ctx: &GameContext) -> Option<RuleEffect> {
+        let mut new_rule_effect = None;
+        for (criteria, rule_effect) in self
+            .game_rules
+            .iter()
+            .map(|(_id, (criteria, rule))| (&criteria.handler, &rule.effect))
+        {
+            if criteria(game_ctx) {
+                if new_rule_effect.is_some() {
+                    // double rule, no rules apply
+                    return None;
+                }
+                new_rule_effect = Some(rule_effect.clone());
+            }
+        }
+
+        new_rule_effect
+    }
 
     /// returns Err if there are no more rules
     pub fn add_rule(&mut self) -> Result<RuleInfo, ()> {
@@ -563,17 +695,34 @@ impl RuleManager {
             self.rule_pool.pop().ok_or(())?,
         );
         let (rule_desc, criteria_desc) = (rule.description.clone(), criteria.description.clone());
-        self.game_rules.push((rule, criteria));
+        let id = self.next_game_rule_id;
+        self.next_game_rule_id += 1;
+        self.game_rules.insert(id, (rule, criteria));
         Ok(RuleInfo {
             rule: rule_desc,
             criteria: criteria_desc,
+            id,
         })
     }
 
-    pub fn active_rules(&self) -> Vec<RuleInfo> {
+    /// returns true if the rule was successfully removed
+    ///
+    /// will reinsert the criteria and rule to the pool
+    pub fn remove_rule(&mut self, id: &usize) -> bool {
+        if let Some((criteria, rule)) = self.game_rules.remove(id) {
+            self.criteria_pool.insert(0, criteria);
+            self.rule_pool.insert(0, rule);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn active_rules_info(&self) -> Vec<RuleInfo> {
         self.game_rules
             .iter()
-            .map(|(crit, rule)| RuleInfo {
+            .map(|(id, (crit, rule))| RuleInfo {
+                id: *id,
                 criteria: crit.description.clone(),
                 rule: rule.description.clone(),
             })

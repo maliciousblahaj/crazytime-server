@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use chrono::{Duration, Utc};
 use rand::seq::SliceRandom;
+use replace_with::replace_with_or_abort;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -11,12 +12,12 @@ use crate::{
     game::{
         r#match::{MatchInfo, MatchState},
         round::{
-            Count, InputPlayerAction, InputPlayerMove, PlayerAction, PlayerActionType, PlayerMove,
-            RoundState, RoundTerminationType,
+            ActionChain, ActionChainMoves, Count, InputPlayerAction, InputPlayerMove, PlayerAction,
+            PlayerActionType, PlayerMove, RoundTerminationType,
         },
     },
     lobby::{AutoMessage, InternalLobbyMessage, LobbyBroadcaster, PlayerId},
-    rules::{RuleInfo, RuleManager},
+    rules::{RuleEffectDuration, RuleInfo, RuleManager},
 };
 
 pub mod r#match;
@@ -225,7 +226,7 @@ impl GameState {
                 let player_action = PlayerAction {
                     player_id,
                     time,
-                    r#type: player_action_type,
+                    r#type: player_action_type.clone(),
                 };
                 current_round.player_actions.push(player_action.clone());
                 broadcaster.broadcast(ServerMessage::ActionPerformed(player_action));
@@ -238,9 +239,8 @@ impl GameState {
                     &current_match.players,
                     time,
                 ) {
-                    let public_card_stacks = current_round.public_card_stacks.clone();
+                    let revealed_card_stacks = current_round.revealed_card_stacks.clone();
 
-                    current_round.round_termination = Some(round_termination.clone());
                     current_match
                         .previous_rounds
                         .push(current_match.current_round.take().unwrap());
@@ -279,15 +279,18 @@ impl GameState {
                                 let lobby_tx = self.lobby_tx.clone();
                                 tokio::spawn(async move {
                                     tokio::time::sleep(duration).await;
-                                    lobby_tx.send(InternalLobbyMessage::AutoMessage(
-                                        AutoMessage::AutoStartMatch,
-                                    ));
+                                    lobby_tx
+                                        .send(InternalLobbyMessage::AutoMessage(
+                                            AutoMessage::AutoStartMatch,
+                                        ))
+                                        .inspect_err(|e| tracing::error!(error = %e))
+                                        .ok();
                                 });
                             }
                             return;
                         }
                     };
-                    let mut revealed_cards: Vec<Card> = public_card_stacks
+                    let mut revealed_cards: Vec<Card> = revealed_card_stacks
                         .into_iter()
                         .flat_map(|card_stack| card_stack.1.into_iter())
                         .collect();
@@ -315,25 +318,87 @@ impl GameState {
                         let lobby_tx = self.lobby_tx.clone();
                         tokio::spawn(async move {
                             tokio::time::sleep(duration).await;
-                            lobby_tx.send(InternalLobbyMessage::AutoMessage(
-                                AutoMessage::AutoStartRound,
-                            ));
+                            lobby_tx
+                                .send(InternalLobbyMessage::AutoMessage(
+                                    AutoMessage::AutoStartRound,
+                                ))
+                                .inspect_err(|e| tracing::error!(error = %e))
+                                .ok();
                         });
                     }
 
                     return;
                 }
+                // else check for new rule effects and run them, of course only if a valid move was made though
+                if let PlayerActionType::Move(_player_move) = player_action_type // this already exists in previous_moves
+                    && let ActionChain::Moves { .. } = current_round.action_chain
+                {
+                    let game_ctx = GameContext {
+                        players: current_match.players.get_player_vec(),
+                        n_cards_in_pool: current_match.card_pool.n_cards(),
+                        // current_move: &player_move,
+                        previous_match_winner: self
+                            .previous_matches
+                            .last()
+                            .map(|match_state| match_state.winner)
+                            .flatten(),
+                        // round_starting_player: &current_round.starting_player,
+                        // player_actions: &current_round.player_actions,
+                        previous_moves: &current_round.get_previous_moves(),
+                        revealed_card_stacks: &current_round.revealed_card_stacks,
+                    };
+                    if let Some(rule_effect) = self.rule_manager.get_new_active_effect(&game_ctx)
+                        && let RuleEffectDuration::RestOfRound = rule_effect.duration
+                    {
+                        current_round.active_effects.push(rule_effect.clone());
+                    }
+                    replace_with_or_abort(&mut current_round.active_effects, |active_effects| {
+                        let mut kept_effects = Vec::with_capacity(active_effects.len());
+                        replace_with_or_abort(
+                            &mut current_round.action_chain,
+                            |mut action_chain| {
+                                for mut effect in active_effects.into_iter().rev() {
+                                    let ActionChain::Moves {
+                                        previous_moves,
+                                        turn_manager,
+                                        move_manager,
+                                    } = action_chain
+                                    else {
+                                        panic!("impossible!!");
+                                    };
+                                    action_chain = (*effect.handler)(
+                                        ActionChainMoves {
+                                            previous_moves,
+                                            turn_manager,
+                                            move_manager,
+                                        },
+                                        &game_ctx,
+                                    );
+                                    if !effect.duration.decrease() {
+                                        kept_effects.push(effect);
+                                    }
+                                }
+                                action_chain
+                            },
+                        );
+                        kept_effects
+                    });
+                }
             }
-            GameMessage::AddNewRule => todo!(),
-            GameMessage::RemoveRule(_) => todo!(),
         }
     }
 
     pub fn handle_auto_message(&mut self, message: AutoMessage) {
         match message {
-            AutoMessage::ActionTimeout => todo!(),
-            AutoMessage::AutoStartMatch => todo!(),
-            AutoMessage::AutoStartRound => todo!(),
+            AutoMessage::ActionTimeout => {
+                // TODO
+            }
+            AutoMessage::AutoStartMatch => {
+                // TODO
+            }
+            AutoMessage::AutoStartRound => {
+                // TODO
+            }
         }
     }
 
@@ -359,7 +424,7 @@ impl GameState {
                 .previous_matches
                 .last()
                 .map(|state| state.winner.unwrap()),
-            active_rules: self.rule_manager.active_rules(),
+            active_rules: self.rule_manager.active_rules_info(),
         }
     }
 }
@@ -369,37 +434,49 @@ impl GameState {
 pub struct GameContext<'a> {
     pub players: &'a Vec<PlayerId>,
     pub n_cards_in_pool: usize,
-    pub previous_matches: &'a Vec<MatchState>,
-    pub previous_rounds: &'a Vec<RoundState>,
-    pub round_starting_player: &'a PlayerId,
+    pub previous_match_winner: Option<PlayerId>,
+    // pub previous_matches: &'a Vec<MatchState>,
+    // pub previous_rounds: &'a Vec<RoundState>,
     /// every move/hit that is made is pushed onto this stack, including the last one
-    pub player_actions: &'a Vec<PlayerAction>,
+    pub previous_moves: &'a Vec<(PlayerId, PlayerMove)>,
     /// the cards each player has revealed this round
-    pub public_card_stacks: &'a HashMap<PlayerId, Vec<Card>>,
+    pub revealed_card_stacks: &'a HashMap<PlayerId, Vec<Card>>,
 }
 
 impl<'a> GameContext<'a> {
-    pub fn get_just_revealed_card(&self) -> Option<&Card> {
-        if let Some(PlayerAction { r#type, .. }) = self.player_actions.last()
-            && let PlayerActionType::Move(player_move) = r#type
-            && let PlayerMove::CountAndLayCard { card, .. } | PlayerMove::LayCard(card) =
-                player_move
+    pub fn get_just_revealed_card(&self) -> Option<Card> {
+        if let Some(PlayerMove::CountAndLayCard { card, .. } | PlayerMove::LayCard(card)) =
+            self.previous_moves.last().map(|x| x.1)
         {
             Some(card)
         } else {
             None
         }
     }
-    pub fn get_just_said_count(&self) -> Option<&Count> {
-        if let Some(PlayerAction { r#type, .. }) = self.player_actions.last()
-            && let PlayerActionType::Move(player_move) = r#type
-            && let PlayerMove::CountAndLayCard { count, .. } | PlayerMove::Count(count) =
-                player_move
+    /// returns None if no count was said
+    pub fn get_just_said_count(&self) -> Option<Count> {
+        if let Some(PlayerMove::CountAndLayCard { count, .. } | PlayerMove::Count(count)) =
+            self.previous_moves.last().map(|x| x.1)
         {
             Some(count)
         } else {
             None
         }
+    }
+
+    pub fn get_n_previous_cards(&self, n: usize) -> Option<Vec<Card>> {
+        let cards: Vec<Card> = self
+            .previous_moves
+            .iter()
+            .rev()
+            .filter_map(|(_player, prev_move)| match prev_move {
+                PlayerMove::CountAndLayCard { card, .. } => Some(*card),
+                PlayerMove::LayCard(card) => Some(*card),
+                _ => None,
+            })
+            .take(n)
+            .collect();
+        if cards.len() < n { None } else { Some(cards) }
     }
 }
 
@@ -416,6 +493,4 @@ pub struct GameInfo {
 //these are internal messages
 pub enum GameMessage {
     ActionPerformed(InputPlayerAction),
-    AddNewRule,
-    RemoveRule(usize),
 }

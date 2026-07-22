@@ -1,6 +1,8 @@
 use crate::{
     ErrorMessage, ServerMessage, SessionId,
-    game::{GameMessage, GameState, LobbySettings, r#match::MatchState, round::RoundState},
+    game::{
+        GameInfo, GameMessage, GameState, LobbySettings, r#match::MatchState, round::RoundState,
+    },
 };
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
@@ -37,7 +39,7 @@ pub async fn lobby_task(
             _ = async { disconnect_timer.as_mut().unwrap().1.as_mut().await }, if disconnect_timer.is_some() => {
                 let session_id = disconnect_timer.as_ref().unwrap().0;
 
-                remove_session_tx.send(session_id);
+                remove_session_tx.send(session_id).inspect_err(|e| tracing::error!(error = %e)).ok();
                 if lobby.session_left(session_id, LeftLobbyReason::Disconnected) {
                     break 'lobby_runtime;
                 };
@@ -61,7 +63,7 @@ pub async fn lobby_task(
                     },
                     InternalLobbyMessage::PlayerLeft(session_id) => {
 
-                        remove_session_tx.send(session_id);
+                        remove_session_tx.send(session_id).inspect_err(|e| tracing::error!(error = %e)).ok();
                         if lobby.session_left(session_id, LeftLobbyReason::Left) {
                             break 'lobby_runtime;
                         }
@@ -95,7 +97,7 @@ impl Lobby {
     ) -> Self {
         let host_id = PlayerId::from(0);
         let mut player_map = LobbyPlayers::new();
-        player_map.insert(host_session, host_id);
+        player_map.insert(host_session, host_id).unwrap();
         let mut broadcaster = LobbyBroadcaster::new();
         broadcaster.add_player_tx(host_id, host_tx);
         Self {
@@ -242,6 +244,33 @@ impl Lobby {
                         current_match.current_round = Some(current_round);
                         return false;
                     }
+                    HostMessage::AddNewRule => {
+                        let Some(ref mut game_state) = self.game_state else {
+                            self.broadcaster.send_to_player(
+                                &player_id,
+                                ServerMessage::Error(ErrorMessage::NotInGame),
+                            );
+                            return false;
+                        };
+                        if let Ok(rule_info) = game_state.rule_manager.add_rule() {
+                            self.broadcaster
+                                .broadcast(ServerMessage::RuleAdded(rule_info));
+                        }
+                        return false;
+                    }
+                    HostMessage::RemoveRule(id) => {
+                        let Some(ref mut game_state) = self.game_state else {
+                            self.broadcaster.send_to_player(
+                                &player_id,
+                                ServerMessage::Error(ErrorMessage::NotInGame),
+                            );
+                            return false;
+                        };
+                        if game_state.rule_manager.remove_rule(&id) {
+                            self.broadcaster.broadcast(ServerMessage::RuleRemoved(id));
+                        }
+                        return false;
+                    }
                     HostMessage::TransferHost(player_id) => {
                         if player_id != self.host {
                             self.host = player_id;
@@ -272,7 +301,8 @@ impl Lobby {
                     HostMessage::KickPlayer(_player_id) => {
                         // check if player in game or match, if so call
                         // self.game_state.remove_player or the corresponding match variant
-                        todo!()
+                        // TODO not implemented
+                        return false;
                     }
                     HostMessage::CloseLobby => {
                         self.broadcaster
@@ -326,6 +356,7 @@ impl Lobby {
             players: self.player_map.players().copied().collect(),
             host: self.host,
             settings: self.settings.clone(),
+            current_game: self.game_state.as_ref().map(|state| state.info()),
         }
     }
 }
@@ -339,8 +370,7 @@ pub struct LobbyInfo {
     players: Vec<PlayerId>,
     host: PlayerId,
     settings: LobbySettings,
-    // TODO should this be sent as Game
-    // current_game: Option<GameInfo>,
+    current_game: Option<GameInfo>,
 }
 
 pub enum LobbyMessage {
@@ -352,6 +382,8 @@ pub enum HostMessage {
     StartGame,
     StartMatch,
     StartRound,
+    AddNewRule,
+    RemoveRule(usize),
     TransferHost(PlayerId),
     // not implemented
     // AddBot,
@@ -429,13 +461,21 @@ impl LobbyBroadcaster {
     }
 
     pub fn send_to_player(&self, player_id: &PlayerId, message: ServerMessage) {
-        self.player_tx.get(player_id).unwrap().send(message);
+        self.player_tx
+            .get(player_id)
+            .unwrap()
+            .send(message)
+            .inspect_err(|e| tracing::error!(error = %e))
+            .ok();
     }
 
     /// send a server message to all online players in the lobby
     pub fn broadcast(&self, message: ServerMessage) {
         for connection_tx in self.player_tx.values() {
-            connection_tx.send(message.clone());
+            connection_tx
+                .send(message.clone())
+                .inspect_err(|e| tracing::error!(error = %e))
+                .ok();
         }
     }
 

@@ -5,6 +5,8 @@ edition = "2024"
 
 [dependencies]
 axum = { version = "0.8.9", features = ["ws"] }
+base64 = "0.22.1"
+bytes = "1.12.1"
 chrono = { version = "0.4.45", features = ["serde"] }
 color-eyre = "0.6.5"
 rand = "0.10.2"

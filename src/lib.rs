@@ -1,3 +1,9 @@
+use std::{
+    fmt::{Debug, Display},
+    str::FromStr,
+};
+
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -50,6 +56,7 @@ pub enum ServerMessage {
     // if a lobby setting change triggers the current game
     ActiveGameSettingsUpdated(ActiveGameSettings),
     RuleAdded(RuleInfo),
+    RuleRemoved(usize),
 
     // match
     MatchStarted(MatchInfo),
@@ -85,6 +92,8 @@ pub enum ServerMessage {
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ErrorMessage {
+    InvalidClientMessage,
+
     NotInLobby,
     NotInGame,
     NotInMatch,
@@ -128,12 +137,50 @@ pub enum ClientMessage {
 }
 
 /// corresponds exactly to the session id of the user, used to authenticate
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionId(u128);
+#[derive(Clone, Copy, Eq, PartialEq, Hash)]
+pub struct SessionId([u8; 32]);
 
 impl SessionId {
     pub fn new() -> Self {
         Self(rand::random())
+    }
+}
+
+impl Debug for SessionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", URL_SAFE_NO_PAD.encode(self.0))
+    }
+}
+
+impl Display for SessionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", URL_SAFE_NO_PAD.encode(self.0))
+    }
+}
+
+impl FromStr for SessionId {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let bytes = URL_SAFE_NO_PAD
+            .decode(s)
+            .map_err(|e| format!("invalid base64: {e}"))?;
+        let arr: [u8; 32] = bytes.try_into().map_err(|v: Vec<u8>| {
+            format!(
+                "invalid session id length: expected 32 bytes, got {}",
+                v.len()
+            )
+        })?;
+        Ok(Self(arr))
+    }
+}
+
+impl<'de> Deserialize<'de> for SessionId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        s.parse().map_err(serde::de::Error::custom)
     }
 }

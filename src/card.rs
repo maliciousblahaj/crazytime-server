@@ -289,7 +289,7 @@ impl CardPool {
     }
 }
 
-#[derive(Clone, Copy, Serialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Card {
     pub clock: ClockType,

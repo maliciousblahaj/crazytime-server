@@ -238,6 +238,8 @@ name = "crazytime-server"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64",
+ "bytes",
  "chrono",
  "color-eyre",
  "rand 0.10.2",

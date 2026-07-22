@@ -6,7 +6,7 @@ use crate::{
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 
 pub struct RoundState {
     pub starting_player: PlayerId,
@@ -15,7 +15,7 @@ pub struct RoundState {
     pub player_actions: Vec<PlayerAction>,
 
     /// the cards each player has revealed this round
-    pub public_card_stacks: HashMap<PlayerId, Vec<Card>>,
+    pub revealed_card_stacks: HashMap<PlayerId, Vec<Card>>,
 
     /// the active effects, inverse order, should be evaluated from last to first element
     pub active_effects: Vec<RuleEffect>,
@@ -31,18 +31,18 @@ impl RoundState {
         Self {
             starting_player,
             player_actions: Vec::new(),
-            public_card_stacks: HashMap::new(),
+            revealed_card_stacks: HashMap::new(),
             active_effects: Vec::new(),
             action_chain: ActionChain::Moves {
-                previous_moves: PreviousMoves(Vec::new()),
+                previous_moves: Vec::new(),
                 turn_manager: TurnManager {
                     starting_player,
                     direction: PlayerDirection::FORWARD,
-                    player_queue: VecDeque::new(),
+                    next_player: None,
                 },
                 move_manager: MoveManager {
                     count_interval: TimeInterval::ONEHOUR,
-                    move_queue: VecDeque::new(),
+                    next_move: None,
                 },
             },
             round_termination: None,
@@ -53,8 +53,19 @@ impl RoundState {
         RoundInfo {
             starting_player: self.starting_player,
             player_actions: self.player_actions.clone(),
-            public_card_stacks: self.public_card_stacks.clone(),
+            revealed_card_stacks: self.revealed_card_stacks.clone(),
         }
+    }
+
+    pub fn get_previous_moves(&self) -> Vec<(PlayerId, PlayerMove)> {
+        self.player_actions
+            .iter()
+            .rev()
+            .filter_map(|action| match action.r#type {
+                PlayerActionType::Move(player_move) => Some((action.player_id, player_move)),
+                _ => None,
+            })
+            .collect()
     }
 }
 // maybe we can think of rules having RuleEffect's, where some rules only have the effect on the next move
@@ -81,19 +92,19 @@ pub struct MoveManager {
     // to handle the existing possiblity of a fixed chain being there
     //
     // the hashset is for supporting multiple possible valid moves
-    pub move_queue: VecDeque<HashSet<ValidPlayerMoveType>>,
+    pub next_move: Option<HashSet<ValidInputPlayerMoveType>>,
 }
 impl MoveManager {
     /// returns Some if the move was correct, and None if incorrect
     pub fn process<'a>(
         &mut self,
-        previous_moves: impl DoubleEndedIterator<Item = &'a ValidPlayerMoveType>,
+        previous_moves: impl DoubleEndedIterator<Item = &'a ValidInputPlayerMoveType>,
         player_move: InputPlayerMove,
-    ) -> Option<ValidPlayerMoveType> {
-        let Ok(player_move) = ValidPlayerMoveType::try_from(player_move) else {
+    ) -> Option<ValidInputPlayerMoveType> {
+        let Ok(player_move) = ValidInputPlayerMoveType::try_from(player_move) else {
             return None;
         };
-        if let Some(allowed_moves) = self.move_queue.pop_front() {
+        if let Some(allowed_moves) = self.next_move.take() {
             if allowed_moves.contains(&player_move) {
                 return Some(player_move);
             } else {
@@ -113,8 +124,8 @@ impl MoveManager {
             None => Time::One,
         };
         match player_move {
-            ValidPlayerMoveType::CountAndLayCard(valid_count) => {
-                if let ValidCount::Time(time) = valid_count
+            ValidInputPlayerMoveType::CountAndLayCard(count) => {
+                if let ValidCount::Time(time) = count
                     && time == expected_time
                 {
                     Some(player_move)
@@ -125,12 +136,16 @@ impl MoveManager {
             _ => None,
         }
     }
+
+    pub fn set_next_move(&mut self, valid_move: ValidInputPlayerMoveType) {
+        self.next_move = Some(HashSet::from([valid_move]));
+    }
 }
 
 pub struct TurnManager {
     starting_player: PlayerId,
     pub direction: PlayerDirection,
-    pub player_queue: VecDeque<HashSet<PlayerId>>,
+    pub next_player: Option<HashSet<PlayerId>>,
 }
 
 impl TurnManager {
@@ -141,7 +156,7 @@ impl TurnManager {
         previous_player: Option<&PlayerId>,
         match_players: &MatchPlayers,
     ) -> bool {
-        if let Some(allowed_players) = self.player_queue.pop_front() {
+        if let Some(allowed_players) = self.next_player.take() {
             if allowed_players.contains(&player) {
                 return true;
             } else {
@@ -163,13 +178,14 @@ impl TurnManager {
 
         player == next_player
     }
+    pub fn set_next_player(&mut self, player: PlayerId) {
+        self.next_player = Some(HashSet::from([player]));
+    }
 }
-
-pub struct PreviousMoves(Vec<ValidPlayerMove>);
 
 /// provided as input for rules, made from destructuring ActionChain
 pub struct ActionChainMoves {
-    pub previous_moves: PreviousMoves,
+    pub previous_moves: Vec<ValidInputPlayerMove>,
     pub turn_manager: TurnManager,
     pub move_manager: MoveManager,
 }
@@ -177,7 +193,7 @@ pub struct ActionChainMoves {
 /// The correct chain of actions in a state
 pub enum ActionChain {
     Moves {
-        previous_moves: PreviousMoves,
+        previous_moves: Vec<ValidInputPlayerMove>,
         turn_manager: TurnManager,
         move_manager: MoveManager,
     },
@@ -229,18 +245,12 @@ impl RoundTerminationType {
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-enum ErrorReason {
+pub enum ErrorReason {
     MoveOutOfTurn,
     InvalidMove,
     InvalidHit,
     InvalidHitType,
     InvalidWinDeclaration,
-}
-
-enum ActionChainAdvancement {
-    Continue,
-    PlayerLostRound(PlayerId),
-    PlayerWonMatch(PlayerId),
 }
 
 // maybe the advancement should be a rule effect in and of itself, that is inserted first out of all
@@ -308,20 +318,19 @@ impl ActionChain {
                     } => {
                         // validate if the player is in turn
                         let previous_player =
-                            previous_moves.0.last().map(|prev_move| &prev_move.player);
+                            previous_moves.last().map(|prev_move| &prev_move.player);
                         if !turn_manager.process(player_id, previous_player, match_players) {
                             let error = ActionError {
                                 player: player_id,
                                 reason: ErrorReason::MoveOutOfTurn,
                                 occured: time,
                             };
-                            std::mem::drop(chain);
                             bail_error!(self, error);
                             return None;
                         }
                         // validate if the move is correct
                         let Some(valid_move_type) = move_manager.process(
-                            previous_moves.0.iter().map(|prev_move| &prev_move.r#type),
+                            previous_moves.iter().map(|prev_move| &prev_move.r#type),
                             player_move,
                         ) else {
                             let error = ActionError {
@@ -333,7 +342,7 @@ impl ActionChain {
                             return None;
                         };
                         // add the move to valid moves
-                        previous_moves.0.push(ValidPlayerMove {
+                        previous_moves.push(ValidInputPlayerMove {
                             player: player_id,
                             r#type: valid_move_type,
                         });
@@ -424,7 +433,7 @@ impl ActionChain {
                     } => {
                         // validate if the player is in turn
                         let previous_player =
-                            previous_moves.0.last().map(|prev_move| &prev_move.player);
+                            previous_moves.last().map(|prev_move| &prev_move.player);
                         if !turn_manager.process(player_id, previous_player, match_players) {
                             let error = ActionError {
                                 player: player_id,
@@ -478,7 +487,7 @@ impl RoundState {
 pub struct RoundInfo {
     starting_player: PlayerId,
     player_actions: Vec<PlayerAction>,
-    public_card_stacks: HashMap<PlayerId, Vec<Card>>,
+    revealed_card_stacks: HashMap<PlayerId, Vec<Card>>,
 }
 
 /// in half an hour steps
@@ -599,30 +608,29 @@ pub enum InputPlayerMove {
     Count(Count),
     LayCard,
 }
-
-pub struct ValidPlayerMove {
-    player: PlayerId,
-    r#type: ValidPlayerMoveType,
+pub struct ValidInputPlayerMove {
+    pub player: PlayerId,
+    pub r#type: ValidInputPlayerMoveType,
 }
 
 #[derive(PartialEq, Eq, Hash)]
-pub enum ValidPlayerMoveType {
+pub enum ValidInputPlayerMoveType {
     CountAndLayCard(ValidCount),
     Count(ValidCount),
     LayCard,
 }
-impl TryFrom<InputPlayerMove> for ValidPlayerMoveType {
+impl TryFrom<InputPlayerMove> for ValidInputPlayerMoveType {
     type Error = ();
 
     fn try_from(value: InputPlayerMove) -> Result<Self, Self::Error> {
         Ok(match value {
             InputPlayerMove::CountAndLayCard(count) => {
-                ValidPlayerMoveType::CountAndLayCard(ValidCount::try_from(count)?)
+                ValidInputPlayerMoveType::CountAndLayCard(ValidCount::try_from(count)?)
             }
             InputPlayerMove::Count(count) => {
-                ValidPlayerMoveType::Count(ValidCount::try_from(count)?)
+                ValidInputPlayerMoveType::Count(ValidCount::try_from(count)?)
             }
-            InputPlayerMove::LayCard => ValidPlayerMoveType::LayCard,
+            InputPlayerMove::LayCard => ValidInputPlayerMoveType::LayCard,
         })
     }
 }
@@ -644,7 +652,7 @@ impl TryFrom<Count> for ValidCount {
     }
 }
 
-impl ValidPlayerMoveType {
+impl ValidInputPlayerMoveType {
     pub fn get_count(&self) -> Option<&ValidCount> {
         match self {
             Self::CountAndLayCard(count) => Some(count),
