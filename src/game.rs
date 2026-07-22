@@ -203,6 +203,13 @@ impl GameState {
                                     );
                                     return;
                                 };
+                                current_round
+                                    .revealed_card_stacks
+                                    .entry(player_id)
+                                    .and_modify(|stack| {
+                                        stack.push(card);
+                                    })
+                                    .or_insert(Vec::from([card]));
                                 PlayerMove::CountAndLayCard { card, count }
                             }
                             InputPlayerMove::Count(count) => PlayerMove::Count(count),
@@ -214,6 +221,13 @@ impl GameState {
                                     );
                                     return;
                                 };
+                                current_round
+                                    .revealed_card_stacks
+                                    .entry(player_id)
+                                    .and_modify(|stack| {
+                                        stack.push(card);
+                                    })
+                                    .or_insert(Vec::from([card]));
                                 PlayerMove::LayCard(card)
                             }
                         };
@@ -240,7 +254,7 @@ impl GameState {
                     time,
                 ) {
                     let revealed_card_stacks = current_round.revealed_card_stacks.clone();
-
+                    current_round.round_termination = Some(round_termination);
                     current_match
                         .previous_rounds
                         .push(current_match.current_round.take().unwrap());
@@ -347,9 +361,7 @@ impl GameState {
                         previous_moves: &current_round.get_previous_moves(),
                         revealed_card_stacks: &current_round.revealed_card_stacks,
                     };
-                    if let Some(rule_effect) = self.rule_manager.get_new_active_effect(&game_ctx)
-                        && let RuleEffectDuration::RestOfRound = rule_effect.duration
-                    {
+                    if let Some(rule_effect) = self.rule_manager.get_new_active_effect(&game_ctx) {
                         current_round.active_effects.push(rule_effect.clone());
                     }
                     replace_with_or_abort(&mut current_round.active_effects, |active_effects| {
@@ -423,7 +435,8 @@ impl GameState {
             last_match_winner: self
                 .previous_matches
                 .last()
-                .map(|state| state.winner.unwrap()),
+                .map(|state| state.winner)
+                .flatten(),
             active_rules: self.rule_manager.active_rules_info(),
         }
     }
@@ -444,6 +457,7 @@ pub struct GameContext<'a> {
 }
 
 impl<'a> GameContext<'a> {
+    /// returns None if no card was revealed last move
     pub fn get_just_revealed_card(&self) -> Option<Card> {
         if let Some(PlayerMove::CountAndLayCard { card, .. } | PlayerMove::LayCard(card)) =
             self.previous_moves.last().map(|x| x.1)
@@ -453,7 +467,7 @@ impl<'a> GameContext<'a> {
             None
         }
     }
-    /// returns None if no count was said
+    /// returns None if no count was said last move
     pub fn get_just_said_count(&self) -> Option<Count> {
         if let Some(PlayerMove::CountAndLayCard { count, .. } | PlayerMove::Count(count)) =
             self.previous_moves.last().map(|x| x.1)
@@ -462,6 +476,30 @@ impl<'a> GameContext<'a> {
         } else {
             None
         }
+    }
+
+    /// returns an iterator of previous counts in order from latest to earliest
+    pub fn get_previous_counts(&self) -> impl Iterator<Item = Count> {
+        self.previous_moves
+            .iter()
+            .rev()
+            .filter_map(|(_player, prev_move)| match prev_move {
+                PlayerMove::CountAndLayCard { count, .. } => Some(*count),
+                PlayerMove::Count(count) => Some(*count),
+                _ => None,
+            })
+    }
+
+    /// returns an iterator of previous cards in order from latest to earliest
+    pub fn get_previous_cards(&self) -> impl Iterator<Item = Card> {
+        self.previous_moves
+            .iter()
+            .rev()
+            .filter_map(|(_player, prev_move)| match prev_move {
+                PlayerMove::CountAndLayCard { card, .. } => Some(*card),
+                PlayerMove::LayCard(card) => Some(*card),
+                _ => None,
+            })
     }
 
     pub fn get_n_previous_cards(&self, n: usize) -> Option<Vec<Card>> {

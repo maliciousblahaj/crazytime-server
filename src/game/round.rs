@@ -57,10 +57,10 @@ impl RoundState {
         }
     }
 
+    /// returns a Vec of all previous moves in the original order as the moves were made
     pub fn get_previous_moves(&self) -> Vec<(PlayerId, PlayerMove)> {
         self.player_actions
             .iter()
-            .rev()
             .filter_map(|action| match action.r#type {
                 PlayerActionType::Move(player_move) => Some((action.player_id, player_move)),
                 _ => None,
@@ -95,10 +95,30 @@ pub struct MoveManager {
     pub next_move: Option<HashSet<ValidInputPlayerMoveType>>,
 }
 impl MoveManager {
+    /// assumes nothing is in the queue and goes only based on current count and count interval
+    /// the provided iterator must be reversed, in order from latest to earliest move
+    pub fn get_next_expected_time<'a>(
+        &self,
+        previous_moves: impl Iterator<Item = &'a ValidInputPlayerMoveType>,
+    ) -> Time {
+        let mut previous_time = None;
+        for prev_move in previous_moves {
+            if let Some(ValidCount::Time(time)) = prev_move.get_count() {
+                previous_time = Some(time);
+                break;
+            }
+        }
+        match previous_time {
+            Some(time) => time.plus(&self.count_interval),
+            None => Time::One,
+        }
+    }
+
     /// returns Some if the move was correct, and None if incorrect
+    /// the provided iterator must be reversed, in order from latest to earliest move
     pub fn process<'a>(
         &mut self,
-        previous_moves: impl DoubleEndedIterator<Item = &'a ValidInputPlayerMoveType>,
+        previous_moves: impl Iterator<Item = &'a ValidInputPlayerMoveType>,
         player_move: InputPlayerMove,
     ) -> Option<ValidInputPlayerMoveType> {
         let Ok(player_move) = ValidInputPlayerMoveType::try_from(player_move) else {
@@ -112,17 +132,7 @@ impl MoveManager {
             }
         }
 
-        let mut previous_time = None;
-        for prev_move in previous_moves.rev() {
-            if let Some(ValidCount::Time(time)) = prev_move.get_count() {
-                previous_time = Some(time);
-                break;
-            }
-        }
-        let expected_time = match previous_time {
-            Some(time) => time.plus(&self.count_interval),
-            None => Time::One,
-        };
+        let expected_time = self.get_next_expected_time(previous_moves);
         match player_move {
             ValidInputPlayerMoveType::CountAndLayCard(count) => {
                 if let ValidCount::Time(time) = count
@@ -138,7 +148,10 @@ impl MoveManager {
     }
 
     pub fn set_next_move(&mut self, valid_move: ValidInputPlayerMoveType) {
-        self.next_move = Some(HashSet::from([valid_move]));
+        self.set_next_moves(HashSet::from([valid_move]));
+    }
+    pub fn set_next_moves(&mut self, valid_moves: HashSet<ValidInputPlayerMoveType>) {
+        self.next_move = Some(valid_moves);
     }
 }
 
@@ -330,7 +343,10 @@ impl ActionChain {
                         }
                         // validate if the move is correct
                         let Some(valid_move_type) = move_manager.process(
-                            previous_moves.iter().map(|prev_move| &prev_move.r#type),
+                            previous_moves
+                                .iter()
+                                .rev()
+                                .map(|prev_move| &prev_move.r#type),
                             player_move,
                         ) else {
                             let error = ActionError {
@@ -495,15 +511,22 @@ pub struct RoundInfo {
 #[derive(Copy, Clone)]
 pub struct TimeInterval(pub isize);
 impl TimeInterval {
+    pub const MINUSTHREEHOURS: Self = Self(-6);
     pub const MINUSTWOHOURS: Self = Self(-4);
     pub const MINUSONEHOUR: Self = Self(-2);
     pub const MINUSTHIRTYMINUTES: Self = Self(-1);
     pub const THIRTYMINUTES: Self = Self(1);
     pub const ONEHOUR: Self = Self(2);
     pub const TWOHOURS: Self = Self(4);
+    pub const THREEHOURS: Self = Self(6);
 
     pub fn toggle_direction(&mut self) {
         self.0 = -self.0
+    }
+    /// ignores negative values and uses the absolute value
+    /// retains the interval direction
+    pub fn set_step_size(&mut self, step_size: TimeInterval) {
+        self.0 = self.0.signum() * step_size.0.abs();
     }
 }
 
@@ -649,6 +672,12 @@ impl TryFrom<Count> for ValidCount {
             Count::NameOfThisRule => Self::NameOfThisRule,
             other => Self::Time(Time::try_from(&other)?),
         })
+    }
+}
+
+impl From<Time> for ValidCount {
+    fn from(value: Time) -> Self {
+        Self::Time(value)
     }
 }
 

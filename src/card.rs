@@ -328,7 +328,7 @@ pub enum ClockType {
     TimeMachine,
 }
 
-#[derive(Clone, Copy, Eq, Hash, PartialEq, Serialize)]
+#[derive(Clone, Copy, PartialOrd, Ord, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Time {
     One,

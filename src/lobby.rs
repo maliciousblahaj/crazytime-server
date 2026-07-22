@@ -271,13 +271,20 @@ impl Lobby {
                         }
                         return false;
                     }
-                    HostMessage::TransferHost(player_id) => {
-                        if player_id != self.host {
-                            self.host = player_id;
+                    HostMessage::TransferHost(new_host) => {
+                        if new_host != self.host && self.player_map.contains_player(&new_host) {
+                            self.host = new_host;
                             self.broadcaster
                                 .broadcast(ServerMessage::HostChanged(self.host));
-                            return false;
+                        } else {
+                            self.broadcaster.send_to_player(
+                                &player_id,
+                                ServerMessage::Error(ErrorMessage::Other(
+                                    "Invalid host transfer recipient".to_string(),
+                                )),
+                            );
                         }
+                        return false;
                     }
                     HostMessage::SetSettings(lobby_settings) => {
                         self.settings = lobby_settings.clone();
@@ -549,5 +556,9 @@ impl LobbyPlayers {
         let player_id = self.session_player.remove(session_id)?;
         self.player_session.remove(&player_id);
         Some(player_id)
+    }
+
+    pub fn contains_player(&self, player: &PlayerId) -> bool {
+        self.player_session.contains_key(player)
     }
 }
