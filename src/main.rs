@@ -45,7 +45,7 @@ async fn main() -> color_eyre::Result<()> {
     let port: u16 = std::env::var("CRAZYTIME_PORT")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(8080);
+        .unwrap_or(443);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     let listener = tokio::net::TcpListener::bind(addr).await?;

@@ -28,7 +28,12 @@ pub async fn lobby_task(
     lobby_tx: UnboundedSender<InternalLobbyMessage>,
     remove_session_tx: UnboundedSender<SessionId>,
 ) {
-    let mut lobby = Lobby::new(lobby_code, host_id, host_tx, lobby_tx);
+    let mut lobby = Lobby::new(lobby_code, host_id, host_tx.clone(), lobby_tx);
+
+    host_tx
+        .send(ServerMessage::ConnectedToLobby(lobby.info(lobby.host)))
+        .inspect_err(|e| tracing::error!(error = %e))
+        .ok();
 
     // set up a timer on disconnect message
     let disconnect_duration = Duration::from_secs(15);
