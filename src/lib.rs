@@ -31,7 +31,7 @@ pub enum ServerMessage {
 
     // lobby
 
-    // this is provided whenever a users connects to a lobby
+    // this is provided whenever a users connects to a lobby or if they fetch lobby info
     ConnectedToLobby(LobbyInfo),
 
     // LeftLobbyReason is not perfect, as the Disconnected variant will never be constructed (since if you're disconnected you
@@ -119,6 +119,7 @@ pub enum ClientMessage {
     LeaveLobby,
 
     // lobby
+    FetchLobbyInfo,
     StartGame,
     StartMatch,
     StartRound,

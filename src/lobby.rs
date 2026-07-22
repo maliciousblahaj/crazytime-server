@@ -28,10 +28,12 @@ pub async fn lobby_task(
     lobby_tx: UnboundedSender<InternalLobbyMessage>,
     remove_session_tx: UnboundedSender<SessionId>,
 ) {
-    let mut lobby = Lobby::new(lobby_code, host_id, host_tx.clone(), lobby_tx);
-
-    host_tx
-        .send(ServerMessage::ConnectedToLobby(lobby.info(lobby.host)))
+    let mut lobby = Lobby::new(lobby_code, host_id, lobby_tx.clone());
+    lobby_tx
+        .send(InternalLobbyMessage::PlayerConnected {
+            session_id: host_id,
+            connection_tx: host_tx,
+        })
         .inspect_err(|e| tracing::error!(error = %e))
         .ok();
 
@@ -97,14 +99,12 @@ impl Lobby {
     pub fn new(
         lobby_code: LobbyCode,
         host_session: SessionId,
-        host_tx: ConnectionTx,
         lobby_tx: UnboundedSender<InternalLobbyMessage>,
     ) -> Self {
         let host_id = PlayerId::from(0);
         let mut player_map = LobbyPlayers::new();
         player_map.insert(host_session, host_id).unwrap();
-        let mut broadcaster = LobbyBroadcaster::new();
-        broadcaster.add_player_tx(host_id, host_tx);
+        let broadcaster = LobbyBroadcaster::new();
         Self {
             lobby_code,
             player_map,
@@ -122,9 +122,9 @@ impl Lobby {
         // player already exists and reconnected (there is no way to reach this state by joining on two different devices simultaneously,
         // as they would've been hit with ErrorMessage::AlreadyInLobby at join attempt)
         if let Some(&player_id) = self.player_map.get_player_id(&session_id) {
-            self.broadcaster.add_player_tx(player_id, connection_tx);
             self.broadcaster
                 .broadcast(ServerMessage::PlayerBackOnline(player_id));
+            self.broadcaster.add_player_tx(player_id, connection_tx);
             self.broadcaster.send_to_player(
                 &player_id,
                 ServerMessage::ConnectedToLobby(self.info(player_id)),
@@ -149,6 +149,12 @@ impl Lobby {
     fn handle_lobby_message(&mut self, session_id: SessionId, message: LobbyMessage) -> bool {
         let player_id = *self.player_map.get_player_id(&session_id).unwrap();
         match message {
+            LobbyMessage::FetchLobbyInfo => {
+                self.broadcaster.send_to_player(
+                    &player_id,
+                    ServerMessage::ConnectedToLobby(self.info(player_id)),
+                );
+            }
             LobbyMessage::GameMessage(game_message) => match self.game_state {
                 Some(ref mut game_state) => {
                     game_state.handle_message(player_id, game_message, &self.broadcaster);
@@ -386,6 +392,7 @@ pub struct LobbyInfo {
 }
 
 pub enum LobbyMessage {
+    FetchLobbyInfo,
     GameMessage(GameMessage),
     HostMessage(HostMessage),
 }

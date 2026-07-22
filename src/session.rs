@@ -113,6 +113,7 @@ pub async fn lobby_coordinator_task(
                             message => {
                                 // transfer flattened client message to lobby message
                                 let message = match message {
+                                    ClientMessage::FetchLobbyInfo => LobbyMessage::FetchLobbyInfo,
                                     ClientMessage::StartGame => LobbyMessage::HostMessage(HostMessage::StartGame),
                                     ClientMessage::StartMatch => LobbyMessage::HostMessage(HostMessage::StartMatch),
                                     ClientMessage::StartRound => LobbyMessage::HostMessage(HostMessage::StartRound),
