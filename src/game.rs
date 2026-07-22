@@ -3,18 +3,19 @@ use std::collections::HashMap;
 use chrono::{Duration, Utc};
 use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{
     ErrorMessage, ServerMessage,
     card::Card,
     game::{
-        r#match::{MatchInfo, MatchPlayers, MatchState},
+        r#match::{MatchInfo, MatchState},
         round::{
-            InputPlayerAction, InputPlayerMove, PlayerAction, PlayerActionType, PlayerMove,
+            Count, InputPlayerAction, InputPlayerMove, PlayerAction, PlayerActionType, PlayerMove,
             RoundState, RoundTerminationType,
         },
     },
-    lobby::{LobbyBroadcaster, PlayerId},
+    lobby::{AutoMessage, InternalLobbyMessage, LobbyBroadcaster, PlayerId},
     rules::{RuleInfo, RuleManager},
 };
 
@@ -44,11 +45,20 @@ pub struct LobbySettings {
     /// how many of the revealed cards you will pick up if you lose the round
     pub max_cards_picked_up_when_losing: MaxCardsPickedUpWhenLosing,
 
+    /// when a match starts, how many cards are handed out to each player
+    pub n_cards_per_player: usize,
+
     /// how long an action should take before the player loses on timeout
-    pub action_timeout_rate: Duration,
+    pub action_timeout_rate: std::time::Duration,
+
+    /// the time after a match ends to auto start the next match
+    pub auto_start_match: Option<std::time::Duration>,
+
+    /// the time after a round ends to auto start the next round
+    pub auto_start_round: Option<std::time::Duration>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum MaxCardsPickedUpWhenLosing {
     Finite(usize),
@@ -62,7 +72,10 @@ impl Default for LobbySettings {
             expected_error_reaction_time: Duration::seconds(2),
             cards_removed_at_correct_error_report: 0,
             max_cards_picked_up_when_losing: MaxCardsPickedUpWhenLosing::Finite(5),
-            action_timeout_rate: Duration::seconds(10),
+            n_cards_per_player: 7,
+            action_timeout_rate: std::time::Duration::from_secs(10),
+            auto_start_match: Some(std::time::Duration::from_secs(10)),
+            auto_start_round: Some(std::time::Duration::from_secs(3)),
         }
     }
 }
@@ -76,47 +89,88 @@ pub struct ActiveGameSettings {
     pub cards_removed_at_correct_error_report: usize,
     /// See [`LobbySettings.max_cards_picked_up_when_losing`]
     pub max_cards_picked_up_when_losing: MaxCardsPickedUpWhenLosing,
+    /// See [`LobbySettings.n_cards_per_player`]
+    pub n_cards_per_player: usize,
     /// See [`LobbySettings.action_timeout_rate`]
-    pub action_timeout_rate: Duration,
+    pub action_timeout_rate: std::time::Duration,
+    /// See [`LobbySettings.auto_start_match`]
+    pub auto_start_match: Option<std::time::Duration>,
+    /// See [`LobbySettings.auto_start_round`]
+    pub auto_start_round: Option<std::time::Duration>,
 }
 
 impl ActiveGameSettings {
-    pub fn update(&mut self, new_settings: LobbySettings) {
-        self.expected_error_reaction_time = new_settings.expected_error_reaction_time;
-        self.cards_removed_at_correct_error_report =
-            new_settings.cards_removed_at_correct_error_report;
+    /// returns true if it was updated
+    pub fn update(&mut self, new_settings: LobbySettings) -> bool {
+        let mut modified = false;
+        if self.expected_error_reaction_time != new_settings.expected_error_reaction_time {
+            self.expected_error_reaction_time = new_settings.expected_error_reaction_time;
+            modified = true;
+        }
+        if self.cards_removed_at_correct_error_report
+            != new_settings.cards_removed_at_correct_error_report
+        {
+            self.cards_removed_at_correct_error_report =
+                new_settings.cards_removed_at_correct_error_report;
+            modified = true;
+        }
+        if self.max_cards_picked_up_when_losing != new_settings.max_cards_picked_up_when_losing {
+            self.max_cards_picked_up_when_losing = new_settings.max_cards_picked_up_when_losing;
+            modified = true;
+        }
+        if self.n_cards_per_player != new_settings.n_cards_per_player {
+            self.n_cards_per_player = new_settings.n_cards_per_player;
+            modified = true;
+        }
+        if self.action_timeout_rate != new_settings.action_timeout_rate {
+            self.action_timeout_rate = new_settings.action_timeout_rate;
+            modified = true;
+        }
+        if self.auto_start_match != new_settings.auto_start_match {
+            self.auto_start_match = new_settings.auto_start_match;
+            modified = true;
+        }
+        if self.auto_start_round != new_settings.auto_start_round {
+            self.auto_start_round = new_settings.auto_start_round;
+            modified = true;
+        }
+        modified
     }
 }
 
-impl From<LobbySettings> for ActiveGameSettings {
-    fn from(value: LobbySettings) -> Self {
+impl From<&LobbySettings> for ActiveGameSettings {
+    fn from(value: &LobbySettings) -> Self {
         Self {
             expected_error_reaction_time: value.expected_error_reaction_time,
             cards_removed_at_correct_error_report: value.cards_removed_at_correct_error_report,
             max_cards_picked_up_when_losing: value.max_cards_picked_up_when_losing,
+            n_cards_per_player: value.n_cards_per_player,
             action_timeout_rate: value.action_timeout_rate,
+            auto_start_match: value.auto_start_match,
+            auto_start_round: value.auto_start_round,
         }
     }
 }
 
 pub struct GameState {
     pub settings: ActiveGameSettings,
-
-    // in fact we dont even need a player set here, since there wont be any case where
-    // a player is in a lobby but not in a game, so we'll simply have it equal the
-    // lobby set
-    // // here we can just use a BTreeSet since we don't need random gets in O(1),
-    // // while in Match we will need O(1) index->player and O(logn) player->index
-    // pub players: BTreeSet<PlayerId>,
-    /// all previous matches saved
     pub current_match: Option<MatchState>,
     pub previous_matches: Vec<MatchState>,
     pub rule_manager: RuleManager,
+    lobby_tx: UnboundedSender<InternalLobbyMessage>,
 }
 impl GameState {
-    pub fn new() -> Self {
-        todo!()
+    pub fn new(settings: &LobbySettings, lobby_tx: UnboundedSender<InternalLobbyMessage>) -> Self {
+        let settings = ActiveGameSettings::from(settings);
+        Self {
+            settings,
+            current_match: None,
+            previous_matches: Vec::new(),
+            rule_manager: RuleManager::new(),
+            lobby_tx,
+        }
     }
+
     pub fn handle_message(
         &mut self,
         player_id: PlayerId,
@@ -184,8 +238,14 @@ impl GameState {
                     &current_match.players,
                     time,
                 ) {
+                    let public_card_stacks = current_round.public_card_stacks.clone();
+
+                    current_round.round_termination = Some(round_termination.clone());
+                    current_match
+                        .previous_rounds
+                        .push(current_match.current_round.take().unwrap());
                     broadcaster.broadcast(ServerMessage::RoundEnded(round_termination.clone()));
-                    if let Some(guilty) = match round_termination {
+                    let guilty = match round_termination {
                         RoundTerminationType::ErrorReported { reporter, errors } => {
                             if self.settings.cards_removed_at_correct_error_report > 0 {
                                 let cards = current_match.players.take_cards(
@@ -193,90 +253,169 @@ impl GameState {
                                     self.settings.cards_removed_at_correct_error_report,
                                 );
                                 if !cards.is_empty() {
-                                    let n_cards = cards.len();
-                                    current_match.card_pool.add_cards(cards.into_iter());
                                     broadcaster.broadcast(
                                         ServerMessage::PlayerGotRidOfCardsToPool {
                                             player_id: reporter,
-                                            n_cards,
+                                            n_cards: cards.len(),
                                         },
                                     );
+                                    current_match.card_pool.add_cards(cards.into_iter());
                                 }
                             }
-                            Some(errors.last().unwrap().player)
+                            errors.last().unwrap().player
                         }
-                        RoundTerminationType::FaultyErrorReport(player_id) => Some(player_id),
-                        RoundTerminationType::HitPileLast(player_id) => Some(player_id),
-                        RoundTerminationType::FaultyWinDeclaration(player_id) => Some(player_id),
+                        RoundTerminationType::FaultyErrorReport(player_id) => player_id,
+                        RoundTerminationType::HitPileLast(player_id) => player_id,
+                        RoundTerminationType::FaultyWinDeclaration(player_id) => player_id,
                         RoundTerminationType::PlayerWonMatch(player_id) => {
-                            // make the match end
-                            None
-                        }
-                    } {
-                        let mut revealed_cards: Vec<Card> = current_round
-                            .public_card_stacks
-                            .iter()
-                            .fold(Vec::new(), |mut acc, card_stack| {
-                                acc.extend(card_stack.1);
-                                acc
-                            });
-                        revealed_cards.shuffle(&mut rand::rng());
-                        let picked_up_cards = match self.settings.max_cards_picked_up_when_losing {
-                            MaxCardsPickedUpWhenLosing::Finite(n) => {
-                                revealed_cards.split_off(revealed_cards.len().saturating_sub(n))
+                            current_match.winner = Some(player_id);
+                            self.previous_matches
+                                .push(self.current_match.take().unwrap());
+                            broadcaster.broadcast(ServerMessage::MatchEnded);
+                            if let Ok(rule_info) = self.rule_manager.add_rule() {
+                                broadcaster.broadcast(ServerMessage::RuleAdded(rule_info));
                             }
-                            MaxCardsPickedUpWhenLosing::Unlimited => revealed_cards,
-                        };
+                            if let Some(duration) = self.settings.auto_start_match {
+                                let lobby_tx = self.lobby_tx.clone();
+                                tokio::spawn(async move {
+                                    tokio::time::sleep(duration).await;
+                                    lobby_tx.send(InternalLobbyMessage::AutoMessage(
+                                        AutoMessage::AutoStartMatch,
+                                    ));
+                                });
+                            }
+                            return;
+                        }
+                    };
+                    let mut revealed_cards: Vec<Card> = public_card_stacks
+                        .into_iter()
+                        .flat_map(|card_stack| card_stack.1.into_iter())
+                        .collect();
+                    revealed_cards.shuffle(&mut rand::rng());
+                    let picked_up_cards = match self.settings.max_cards_picked_up_when_losing {
+                        MaxCardsPickedUpWhenLosing::Finite(n) => {
+                            revealed_cards.split_off(revealed_cards.len().saturating_sub(n))
+                        }
+                        MaxCardsPickedUpWhenLosing::Unlimited => {
+                            std::mem::take(&mut revealed_cards)
+                        }
+                    };
+                    broadcaster.broadcast(ServerMessage::PlayerPickedUpRevealedCards {
+                        player_id,
+                        n_cards: picked_up_cards.len(),
+                    });
+                    current_match
+                        .players
+                        .add_cards_to_hand(&guilty, picked_up_cards);
+                    current_match
+                        .card_pool
+                        .add_cards(revealed_cards.into_iter());
+
+                    if let Some(duration) = self.settings.auto_start_round {
+                        let lobby_tx = self.lobby_tx.clone();
+                        tokio::spawn(async move {
+                            tokio::time::sleep(duration).await;
+                            lobby_tx.send(InternalLobbyMessage::AutoMessage(
+                                AutoMessage::AutoStartRound,
+                            ));
+                        });
                     }
-                    // round is finished
-                    // broadcast finished round and loser
-                    // if playerwon end match as well
-                    // add to losers card pile from pool
-                    // get rid of 1 card off error reporter
+
                     return;
                 }
             }
-            GameMessage::MoveTimeout => todo!(),
             GameMessage::AddNewRule => todo!(),
             GameMessage::RemoveRule(_) => todo!(),
         }
     }
+
+    pub fn handle_auto_message(&mut self, message: AutoMessage) {
+        match message {
+            AutoMessage::ActionTimeout => todo!(),
+            AutoMessage::AutoStartMatch => todo!(),
+            AutoMessage::AutoStartRound => todo!(),
+        }
+    }
+
     pub fn lobby_settings_updated(
         &mut self,
         lobby_settings: LobbySettings,
     ) -> Option<ActiveGameSettings> {
-        todo!()
+        if self.settings.update(lobby_settings) {
+            Some(self.settings.clone())
+        } else {
+            None
+        }
+    }
+
+    pub fn info(&self) -> GameInfo {
+        GameInfo {
+            settings: self.settings.clone(),
+            current_match: self
+                .current_match
+                .as_ref()
+                .map(|current_match| current_match.info()),
+            last_match_winner: self
+                .previous_matches
+                .last()
+                .map(|state| state.winner.unwrap()),
+            active_rules: self.rule_manager.active_rules(),
+        }
     }
 }
 
 // criterias use this to determine whether to launch a RuleEffect,
 // and RuleEffects also use this when running
 pub struct GameContext<'a> {
-    pub players: &'a MatchPlayers,
+    pub players: &'a Vec<PlayerId>,
     pub n_cards_in_pool: usize,
     pub previous_matches: &'a Vec<MatchState>,
     pub previous_rounds: &'a Vec<RoundState>,
     pub round_starting_player: &'a PlayerId,
-    /// every move/hit that is made is pushed onto this stack
+    /// every move/hit that is made is pushed onto this stack, including the last one
     pub player_actions: &'a Vec<PlayerAction>,
     /// the cards each player has revealed this round
     pub public_card_stacks: &'a HashMap<PlayerId, Vec<Card>>,
+}
+
+impl<'a> GameContext<'a> {
+    pub fn get_just_revealed_card(&self) -> Option<&Card> {
+        if let Some(PlayerAction { r#type, .. }) = self.player_actions.last()
+            && let PlayerActionType::Move(player_move) = r#type
+            && let PlayerMove::CountAndLayCard { card, .. } | PlayerMove::LayCard(card) =
+                player_move
+        {
+            Some(card)
+        } else {
+            None
+        }
+    }
+    pub fn get_just_said_count(&self) -> Option<&Count> {
+        if let Some(PlayerAction { r#type, .. }) = self.player_actions.last()
+            && let PlayerActionType::Move(player_move) = r#type
+            && let PlayerMove::CountAndLayCard { count, .. } | PlayerMove::Count(count) =
+                player_move
+        {
+            Some(count)
+        } else {
+            None
+        }
+    }
 }
 
 // fetched on request
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GameInfo {
-    settings: ActiveGameSettings,
-    active_rules: Vec<RuleInfo>,
-    current_match: Option<MatchInfo>,
-    last_match_winner: Option<PlayerId>,
+    pub settings: ActiveGameSettings,
+    pub current_match: Option<MatchInfo>,
+    pub last_match_winner: Option<PlayerId>,
+    pub active_rules: Vec<RuleInfo>,
 }
 
 //these are internal messages
 pub enum GameMessage {
     ActionPerformed(InputPlayerAction),
-    MoveTimeout,
     AddNewRule,
     RemoveRule(usize),
 }

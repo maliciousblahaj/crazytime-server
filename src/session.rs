@@ -92,7 +92,7 @@ pub async fn lobby_coordinator_task(
                                 };
 
                                 let (lobby_tx, lobby_rx) = mpsc::unbounded_channel();
-                                active_lobbies.spawn(lobby_code.clone(), lobby_task(session_id, connection_tx.clone(), lobby_rx, remove_session_tx.clone()));
+                                active_lobbies.spawn(lobby_code.clone(), lobby_task(lobby_code.clone(), session_id, connection_tx.clone(), lobby_rx, lobby_tx.clone(), remove_session_tx.clone()));
                                 lobby_senders.insert(lobby_code.clone(), lobby_tx);
                                 session_lobby_map.insert(session_id, lobby_code.clone());
                             },
@@ -112,6 +112,8 @@ pub async fn lobby_coordinator_task(
                                 // transfer flattened client message to lobby message
                                 let message = match message {
                                     ClientMessage::StartGame => LobbyMessage::HostMessage(HostMessage::StartGame),
+                                    ClientMessage::StartMatch => LobbyMessage::HostMessage(HostMessage::StartMatch),
+                                    ClientMessage::StartRound => LobbyMessage::HostMessage(HostMessage::StartRound),
                                     ClientMessage::TransferHost(player_id) => LobbyMessage::HostMessage(HostMessage::TransferHost(player_id)),
                                     ClientMessage::KickPlayer(player_id) => LobbyMessage::HostMessage(HostMessage::KickPlayer(player_id)),
                                     ClientMessage::CloseLobby => LobbyMessage::HostMessage(HostMessage::CloseLobby),

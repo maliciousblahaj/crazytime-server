@@ -1,6 +1,6 @@
 use crate::{
     ErrorMessage, ServerMessage, SessionId,
-    game::{GameInfo, GameMessage, GameState, LobbySettings},
+    game::{GameMessage, GameState, LobbySettings, r#match::MatchState, round::RoundState},
 };
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
@@ -18,12 +18,15 @@ use tokio::{
 pub type ConnectionTx = UnboundedSender<ServerMessage>;
 
 pub async fn lobby_task(
+    lobby_code: LobbyCode,
     host_id: SessionId,
     host_tx: ConnectionTx,
     mut lobby_rx: UnboundedReceiver<InternalLobbyMessage>,
+    // to send messages within itself with timed events
+    lobby_tx: UnboundedSender<InternalLobbyMessage>,
     remove_session_tx: UnboundedSender<SessionId>,
 ) {
-    let mut lobby = Lobby::new(host_id, host_tx);
+    let mut lobby = Lobby::new(lobby_code, host_id, host_tx, lobby_tx);
 
     // set up a timer on disconnect message
     let disconnect_duration = Duration::from_secs(15);
@@ -46,6 +49,9 @@ pub async fn lobby_task(
                             break 'lobby_runtime;
                         }
                     },
+                    InternalLobbyMessage::AutoMessage(message) => {
+                        lobby.handle_auto_message(message);
+                    },
                     InternalLobbyMessage::PlayerConnected { session_id, connection_tx } => {
                         lobby.session_connected(session_id, connection_tx);
                     },
@@ -67,8 +73,10 @@ pub async fn lobby_task(
 }
 
 pub struct Lobby {
+    pub lobby_code: LobbyCode,
     pub player_map: LobbyPlayers,
     pub broadcaster: LobbyBroadcaster,
+    lobby_tx: UnboundedSender<InternalLobbyMessage>,
     pub host: PlayerId,
 
     /// next public player id, for incremental assignment
@@ -79,15 +87,22 @@ pub struct Lobby {
 }
 
 impl Lobby {
-    pub fn new(host_session: SessionId, host_tx: ConnectionTx) -> Self {
+    pub fn new(
+        lobby_code: LobbyCode,
+        host_session: SessionId,
+        host_tx: ConnectionTx,
+        lobby_tx: UnboundedSender<InternalLobbyMessage>,
+    ) -> Self {
         let host_id = PlayerId::from(0);
         let mut player_map = LobbyPlayers::new();
         player_map.insert(host_session, host_id);
         let mut broadcaster = LobbyBroadcaster::new();
         broadcaster.add_player_tx(host_id, host_tx);
         Self {
+            lobby_code,
             player_map,
             broadcaster,
+            lobby_tx,
             host: host_id,
             next_player_id: 1,
             settings: LobbySettings::default(),
@@ -105,7 +120,7 @@ impl Lobby {
                 .broadcast(ServerMessage::PlayerBackOnline(player_id));
             self.broadcaster.send_to_player(
                 &player_id,
-                ServerMessage::ConnectedToLobby(self.lobby_info()),
+                ServerMessage::ConnectedToLobby(self.info(player_id)),
             );
             return;
         }
@@ -119,7 +134,7 @@ impl Lobby {
             .broadcast(ServerMessage::PlayerJoined(player_id));
         self.broadcaster.send_to_player(
             &player_id,
-            ServerMessage::ConnectedToLobby(self.lobby_info()),
+            ServerMessage::ConnectedToLobby(self.info(player_id)),
         );
     }
 
@@ -154,8 +169,77 @@ impl Lobby {
                             );
                             return false;
                         }
-                        self.game_state = Some(GameState::new()); // TODO: this constructor should take in all players, and more state as well
-                        self.broadcaster.broadcast(ServerMessage::GameStarted);
+                        let game = GameState::new(&self.settings, self.lobby_tx.clone());
+                        self.broadcaster
+                            .broadcast(ServerMessage::GameStarted(game.info()));
+                        self.game_state = Some(game);
+                        return false;
+                    }
+                    HostMessage::StartMatch => {
+                        let Some(ref mut game_state) = self.game_state else {
+                            self.broadcaster.send_to_player(
+                                &player_id,
+                                ServerMessage::Error(ErrorMessage::NotInGame),
+                            );
+                            return false;
+                        };
+                        if game_state.current_match.is_some() {
+                            self.broadcaster.send_to_player(
+                                &player_id,
+                                ServerMessage::Error(ErrorMessage::AlreadyInMatch),
+                            );
+                            return false;
+                        }
+                        let Ok(current_match) = MatchState::new(
+                            &self.player_map,
+                            game_state.settings.n_cards_per_player,
+                        ) else {
+                            self.broadcaster.send_to_player(&player_id, ServerMessage::Error(ErrorMessage::Other("Failed to start round, settings.n_cards_per_player too high for card pool".to_string())));
+                            return false;
+                        };
+                        self.broadcaster
+                            .broadcast(ServerMessage::MatchStarted(current_match.info()));
+                        game_state.current_match = Some(current_match);
+                        return false;
+                    }
+                    HostMessage::StartRound => {
+                        let Some(ref mut game_state) = self.game_state else {
+                            self.broadcaster.send_to_player(
+                                &player_id,
+                                ServerMessage::Error(ErrorMessage::NotInGame),
+                            );
+                            return false;
+                        };
+                        let Some(ref mut current_match) = game_state.current_match else {
+                            self.broadcaster.send_to_player(
+                                &player_id,
+                                ServerMessage::Error(ErrorMessage::NotInMatch),
+                            );
+                            return false;
+                        };
+                        if current_match.current_round.is_some() {
+                            self.broadcaster.send_to_player(
+                                &player_id,
+                                ServerMessage::Error(ErrorMessage::AlreadyInRound),
+                            );
+                            return false;
+                        }
+                        let starting_player = match current_match.previous_rounds.last() {
+                            Some(round_state) => *round_state
+                                .round_termination
+                                .as_ref()
+                                .unwrap()
+                                .get_loser()
+                                .unwrap(),
+                            None => match game_state.previous_matches.last() {
+                                Some(match_state) => match_state.winner.unwrap(),
+                                None => self.host,
+                            },
+                        };
+                        let current_round = RoundState::new(starting_player);
+                        self.broadcaster
+                            .broadcast(ServerMessage::RoundStarted(current_round.info()));
+                        current_match.current_round = Some(current_round);
                         return false;
                     }
                     HostMessage::TransferHost(player_id) => {
@@ -201,6 +285,12 @@ impl Lobby {
         false
     }
 
+    fn handle_auto_message(&mut self, message: AutoMessage) {
+        if let Some(ref mut game_state) = self.game_state {
+            game_state.handle_auto_message(message);
+        }
+    }
+
     pub fn session_offline(&mut self, session_id: SessionId) {
         let player_id = *self.player_map.get_player_id(&session_id).unwrap();
         self.broadcaster.remove_player_tx(&player_id);
@@ -229,8 +319,14 @@ impl Lobby {
         false
     }
 
-    fn lobby_info(&self) -> LobbyInfo {
-        todo!()
+    fn info(&self, player: PlayerId) -> LobbyInfo {
+        LobbyInfo {
+            you: player,
+            lobby_code: self.lobby_code.clone(),
+            players: self.player_map.players().copied().collect(),
+            host: self.host,
+            settings: self.settings.clone(),
+        }
     }
 }
 
@@ -243,7 +339,8 @@ pub struct LobbyInfo {
     players: Vec<PlayerId>,
     host: PlayerId,
     settings: LobbySettings,
-    current_game: Option<GameInfo>,
+    // TODO should this be sent as Game
+    // current_game: Option<GameInfo>,
 }
 
 pub enum LobbyMessage {
@@ -253,12 +350,20 @@ pub enum LobbyMessage {
 
 pub enum HostMessage {
     StartGame,
+    StartMatch,
+    StartRound,
     TransferHost(PlayerId),
     // not implemented
     // AddBot,
     KickPlayer(PlayerId),
     CloseLobby,
     SetSettings(LobbySettings),
+}
+
+pub enum AutoMessage {
+    ActionTimeout,
+    AutoStartMatch,
+    AutoStartRound,
 }
 pub enum InternalLobbyMessage {
     PlayerConnected {
@@ -269,6 +374,7 @@ pub enum InternalLobbyMessage {
         session_id: SessionId,
         message: LobbyMessage,
     },
+    AutoMessage(AutoMessage),
     /// warns if the player's websocket session disconnected
     PlayerOffline(SessionId),
     PlayerLeft(SessionId),
@@ -361,6 +467,9 @@ pub enum LobbyPlayersInsertError {
 impl LobbyPlayers {
     pub fn new() -> Self {
         Self::default()
+    }
+    pub fn len(&self) -> usize {
+        self.session_player.len()
     }
     pub fn insert(
         &mut self,

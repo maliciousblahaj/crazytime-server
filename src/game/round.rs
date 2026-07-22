@@ -21,8 +21,42 @@ pub struct RoundState {
     pub active_effects: Vec<RuleEffect>,
 
     pub action_chain: ActionChain,
+
+    // for when a round is finished
+    pub round_termination: Option<RoundTerminationType>,
 }
 
+impl RoundState {
+    pub fn new(starting_player: PlayerId) -> Self {
+        Self {
+            starting_player,
+            player_actions: Vec::new(),
+            public_card_stacks: HashMap::new(),
+            active_effects: Vec::new(),
+            action_chain: ActionChain::Moves {
+                previous_moves: PreviousMoves(Vec::new()),
+                turn_manager: TurnManager {
+                    starting_player,
+                    direction: PlayerDirection::FORWARD,
+                    player_queue: VecDeque::new(),
+                },
+                move_manager: MoveManager {
+                    count_interval: TimeInterval::ONEHOUR,
+                    move_queue: VecDeque::new(),
+                },
+            },
+            round_termination: None,
+        }
+    }
+
+    pub fn info(&self) -> RoundInfo {
+        RoundInfo {
+            starting_player: self.starting_player,
+            player_actions: self.player_actions.clone(),
+            public_card_stacks: self.public_card_stacks.clone(),
+        }
+    }
+}
 // maybe we can think of rules having RuleEffect's, where some rules only have the effect on the next move
 // and then forfeit their control, and some rules keep having effects for the rest of the game. Now effects
 // are perfectly compatible with double rules, since double rules is only regarding rule activation (which
@@ -39,7 +73,7 @@ pub struct RoundState {
 // this constantly (since the effect lasts forever)
 
 pub struct MoveManager {
-    count_interval: TimeInterval,
+    pub count_interval: TimeInterval,
     // im thinking if it might be not the best idea to make this a VecDeque, maybe it should only be
     // possible to fix one valid move in advance, where maybe we don't need this generalization. this
     // is because it is more difficult to work with since what if a fixed move is made that reveals
@@ -47,7 +81,7 @@ pub struct MoveManager {
     // to handle the existing possiblity of a fixed chain being there
     //
     // the hashset is for supporting multiple possible valid moves
-    move_queue: VecDeque<HashSet<ValidPlayerMoveType>>,
+    pub move_queue: VecDeque<HashSet<ValidPlayerMoveType>>,
 }
 impl MoveManager {
     /// returns Some if the move was correct, and None if incorrect
@@ -131,7 +165,14 @@ impl TurnManager {
     }
 }
 
-struct PreviousMoves(Vec<ValidPlayerMove>);
+pub struct PreviousMoves(Vec<ValidPlayerMove>);
+
+/// provided as input for rules, made from destructuring ActionChain
+pub struct ActionChainMoves {
+    pub previous_moves: PreviousMoves,
+    pub turn_manager: TurnManager,
+    pub move_manager: MoveManager,
+}
 
 /// The correct chain of actions in a state
 pub enum ActionChain {
@@ -171,6 +212,19 @@ pub enum RoundTerminationType {
     HitPileLast(PlayerId),
     FaultyWinDeclaration(PlayerId),
     PlayerWonMatch(PlayerId),
+}
+impl RoundTerminationType {
+    pub fn get_loser(&self) -> Option<&PlayerId> {
+        match self {
+            RoundTerminationType::ErrorReported { errors, .. } => {
+                Some(&errors.last().unwrap().player)
+            }
+            RoundTerminationType::FaultyErrorReport(player_id) => Some(player_id),
+            RoundTerminationType::HitPileLast(player_id) => Some(player_id),
+            RoundTerminationType::FaultyWinDeclaration(player_id) => Some(player_id),
+            RoundTerminationType::PlayerWonMatch(_) => None,
+        }
+    }
 }
 
 #[derive(Clone, Serialize)]
@@ -241,7 +295,7 @@ impl ActionChain {
         {
             chain_before_first_error
         } else {
-            self
+            &mut *self
         };
         match action {
             InputPlayerAction::Move(player_move) => {
@@ -261,6 +315,7 @@ impl ActionChain {
                                 reason: ErrorReason::MoveOutOfTurn,
                                 occured: time,
                             };
+                            std::mem::drop(chain);
                             bail_error!(self, error);
                             return None;
                         }
@@ -422,7 +477,7 @@ impl RoundState {
 #[serde(rename_all = "camelCase")]
 pub struct RoundInfo {
     starting_player: PlayerId,
-    player_actions: Vec<(PlayerId, PlayerAction)>,
+    player_actions: Vec<PlayerAction>,
     public_card_stacks: HashMap<PlayerId, Vec<Card>>,
 }
 
@@ -584,7 +639,7 @@ impl TryFrom<Count> for ValidCount {
     fn try_from(value: Count) -> Result<Self, Self::Error> {
         Ok(match value {
             Count::NameOfThisRule => Self::NameOfThisRule,
-            other => Self::Time(Time::try_from(other)?),
+            other => Self::Time(Time::try_from(&other)?),
         })
     }
 }

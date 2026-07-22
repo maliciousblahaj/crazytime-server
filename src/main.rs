@@ -1,34 +1,20 @@
 use axum::{
     Json, Router,
-    extract::{
-        State, WebSocketUpgrade,
-        ws::{self, Message},
-    },
+    extract::{State, WebSocketUpgrade, ws},
     response::IntoResponse,
-    routing::post,
+    routing::get,
 };
 use crazytime_server::{
     ClientMessage, ErrorMessage, ServerMessage, SessionId,
-    lobby::{ConnectionTx, Lobby, LobbyCode, LobbyMessage},
-    player::SessionId,
     session::{LobbyCoordinatorMessage, lobby_coordinator_task},
 };
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::HashMap,
-    net::{IpAddr, SocketAddr},
-    sync::Arc,
-};
+use std::{net::SocketAddr, pin::Pin, time::Duration};
 use tokio::{
     select,
-    sync::{
-        Mutex,
-        mpsc::{self, Sender, UnboundedReceiver, UnboundedSender, error::SendError},
-    },
-    task::{self, JoinHandle, JoinSet},
-    time::sleep,
+    sync::mpsc::{self, UnboundedSender},
+    time::{Instant, Sleep, sleep},
 };
-use tokio_util::task::JoinMap;
 
 #[derive(Clone)]
 struct AppState {
@@ -63,11 +49,9 @@ async fn main() -> color_eyre::Result<()> {
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app)
-        .with_graceful_shutdown(signal)
-        .await?;
+    axum::serve(listener, app).with_graceful_shutdown(shutdown_signal);
     lobby_coordinator_tx.send(LobbyCoordinatorMessage::ServerShutdown);
-    lobby_coordinator.await??;
+    lobby_coordinator.await?;
     Ok(())
 }
 
@@ -77,7 +61,7 @@ async fn shutdown_signal() {
     };
     #[cfg(unix)]
     let terminate = async {
-        tokio::signal::unix::signal(signal::unix::SignalKind::terminate())
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
             .expect("failed to install signal handler")
             .recv()
             .await;

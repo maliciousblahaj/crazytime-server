@@ -1,18 +1,13 @@
-use std::fmt::Display;
-
 use serde::{Deserialize, Serialize};
 
 use crate::{
     game::{
-        ActiveGameSettings, LobbySettings,
+        ActiveGameSettings, GameInfo, LobbySettings,
         r#match::MatchInfo,
-        round::{
-            InputPlayerAction, PlayerAction, PlayerActionType, PlayerLostReason,
-            RoundTerminationType,
-        },
+        round::{InputPlayerAction, PlayerAction, RoundInfo, RoundTerminationType},
     },
-    lobby::{LeftLobbyReason, LobbyCode, LobbyInfo, LobbyMessage, PlayerId},
-    rules::Description,
+    lobby::{LeftLobbyReason, LobbyCode, LobbyInfo, PlayerId},
+    rules::RuleInfo,
 };
 
 pub mod card;
@@ -50,14 +45,11 @@ pub enum ServerMessage {
     HostChanged(PlayerId),
 
     // game
-    GameStarted, // will most likely also send MatchStarted at the same time, though not RoundStarted obviously
+    GameStarted(GameInfo), // will most likely also send MatchStarted at the same time, though not RoundStarted obviously
     GameEnded,
     // if a lobby setting change triggers the current game
     ActiveGameSettingsUpdated(ActiveGameSettings),
-    RuleAdded {
-        criteria: Description,
-        rule: Description,
-    },
+    RuleAdded(RuleInfo),
 
     // match
     MatchStarted(MatchInfo),
@@ -82,9 +74,7 @@ pub enum ServerMessage {
     },
 
     // round
-    RoundStarted {
-        starting_player: PlayerId,
-    },
+    RoundStarted(RoundInfo),
     RoundEnded(RoundTerminationType),
     ActionPerformed(PlayerAction),
 
@@ -102,10 +92,13 @@ pub enum ErrorMessage {
     // if you try to lay a card but you don't have any
     NoCards,
     AlreadyInLobby,
+    AlreadyInGame,
+    AlreadyInMatch,
+    AlreadyInRound,
     LobbyDoesNotExist,
     // if you are not host and try send host messages
     InsufficientPermissions,
-    AlreadyInGame,
+    Other(String),
 }
 
 /// a message sent from a client to the server
@@ -118,6 +111,8 @@ pub enum ClientMessage {
 
     // lobby
     StartGame,
+    StartMatch,
+    StartRound,
     TransferHost(PlayerId),
     // not implemented
     // AddBot,
@@ -133,7 +128,7 @@ pub enum ClientMessage {
 }
 
 /// corresponds exactly to the session id of the user, used to authenticate
-#[derive(Clone, Copy, Eq, PartialEq, Hash, Deserialize)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionId(u128);
 

@@ -438,10 +438,10 @@ impl Time {
     }
 }
 
-impl TryFrom<Count> for Time {
+impl TryFrom<&Count> for Time {
     type Error = ();
 
-    fn try_from(value: Count) -> Result<Self, Self::Error> {
+    fn try_from(value: &Count) -> Result<Self, Self::Error> {
         Ok(match value {
             Count::One => Self::One,
             Count::OneThirty => Self::OneThirty,

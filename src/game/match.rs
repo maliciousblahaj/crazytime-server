@@ -4,6 +4,7 @@ use crate::{
         PlayerId,
         round::{RoundInfo, RoundState},
     },
+    lobby::LobbyPlayers,
 };
 use serde::Serialize;
 use std::collections::HashMap;
@@ -13,6 +14,46 @@ pub struct MatchState {
     pub players: MatchPlayers,
     pub previous_rounds: Vec<RoundState>,
     pub current_round: Option<RoundState>,
+    // if the round is finished
+    pub winner: Option<PlayerId>,
+}
+
+impl MatchState {
+    /// returns Err(()) if too many cards per player
+    pub fn new(lobby_players: &LobbyPlayers, n_cards_per_player: usize) -> Result<Self, ()> {
+        let mut card_pool = CardPool::new();
+        if card_pool.n_cards() < n_cards_per_player * lobby_players.len() {
+            return Err(());
+        }
+        let player_hands = lobby_players
+            .players()
+            .map(|player| (*player, card_pool.take_cards(n_cards_per_player)))
+            .collect();
+        Ok(Self {
+            card_pool,
+            players: MatchPlayers::from_player_hands(player_hands),
+            previous_rounds: Vec::new(),
+            current_round: None,
+            winner: None,
+        })
+    }
+
+    pub fn info(&self) -> MatchInfo {
+        MatchInfo {
+            players: self
+                .players
+                .hands
+                .iter()
+                .map(|(player, cards)| (*player, cards.len()))
+                .collect(),
+            n_cards_in_pool: self.card_pool.n_cards(),
+            current_round: self.current_round.as_ref().map(|round| round.info()),
+        }
+    }
+
+    pub fn handle_action_timeout(&self) {
+        todo!()
+    }
 }
 
 /// is sent when a new match starts, or a connection is aquired to a lobby with an existing match
@@ -40,6 +81,13 @@ impl MatchPlayers {
         self.players.len()
     }
 
+    pub fn from_player_hands(hands: HashMap<PlayerId, Vec<Card>>) -> Self {
+        Self {
+            players: hands.keys().copied().collect(),
+            hands,
+        }
+    }
+
     pub fn get(&self, index: usize) -> Option<&PlayerId> {
         self.players.get(index)
     }
@@ -61,6 +109,12 @@ impl MatchPlayers {
             cards.push(card_pile.pop().unwrap());
         }
         cards
+    }
+
+    pub fn add_cards_to_hand(&mut self, player: &PlayerId, mut cards: Vec<Card>) {
+        let card_pile = self.hands.get_mut(player).unwrap();
+        cards.append(card_pile);
+        *card_pile = cards;
     }
 
     /// returns (false, index) if the player already exists at a certain index,

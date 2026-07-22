@@ -10,7 +10,7 @@ A (blazingly fast) crazytime server written in rust
 ### Missing features
 - Lobby game spectating
 - Game pausing by host
-- Rule adding by host
+- Extended card possibilities/truly random CardPool match setting
 - Usernames
 - Bots
 - Public/private lobby toggle
