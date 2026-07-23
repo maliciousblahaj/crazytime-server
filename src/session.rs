@@ -121,7 +121,6 @@ pub async fn lobby_coordinator_task(
                                     ClientMessage::RemoveRule(id) => LobbyMessage::HostMessage(HostMessage::RemoveRule(id)),
                                     ClientMessage::TransferHost(player_id) => LobbyMessage::HostMessage(HostMessage::TransferHost(player_id)),
                                     ClientMessage::KickPlayer(player_id) => LobbyMessage::HostMessage(HostMessage::KickPlayer(player_id)),
-                                    ClientMessage::CloseLobby => LobbyMessage::HostMessage(HostMessage::CloseLobby),
                                     ClientMessage::SetSettings(lobby_settings) => LobbyMessage::HostMessage(HostMessage::SetSettings(lobby_settings)),
                                     ClientMessage::PerformAction(input_player_action) => LobbyMessage::GameMessage(GameMessage::ActionPerformed(input_player_action)),
                                     _ => {panic!("impossible!")}

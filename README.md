@@ -4,20 +4,15 @@
 A (blazingly fast) crazytime server written in rust
 
 ### TODO
-- Remove CloseLobby feature
-- add FetchLobbyInfo ClientMessage
-- On player leave/disconnect, add back card pile to card pool
-- fix minimum match players as 3, and cancel ongoing match if too few players
-- once bots are in place, make a feature to replace disconnected players with bots if they are less than 3
 - better error handling
 - more bug hunting and actual user testing
 
 ### Missing features
 - Lobby game spectating
-- Game pausing by host
+- Game pausing by host (actually not needed since we can just let a round end, and disable auto start round)
 - Extended card possibilities/truly random CardPool match setting
 - Usernames
-- Bots
+- Bots (once in place, maybe make a feature to replace disconnected players with bots if they are less than 3)
 - Public/private lobby toggle
 - Multiple hosts/lobby permissions
 - Lobby join requests (requires being accepted by host)

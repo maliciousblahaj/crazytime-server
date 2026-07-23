@@ -80,7 +80,6 @@ async fn shutdown_signal() {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct WsAuthForm {
     session_id: SessionId,
 }
@@ -169,7 +168,6 @@ async fn ws_endpoint(
 }
 
 #[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct ServerPacket {
     sequence_id: usize,
     message: ServerMessage,

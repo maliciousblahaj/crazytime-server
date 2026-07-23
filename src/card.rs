@@ -290,7 +290,6 @@ impl CardPool {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct Card {
     pub clock: ClockType,
     pub time: Time,
@@ -316,7 +315,6 @@ impl Card {
 }
 
 #[derive(Clone, Copy, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub enum ClockType {
     Sun,
     Hourglass,
@@ -329,7 +327,6 @@ pub enum ClockType {
 }
 
 #[derive(Clone, Copy, PartialOrd, Ord, Eq, Hash, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub enum Time {
     One,
     OneThirty,

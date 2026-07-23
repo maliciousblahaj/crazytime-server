@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     game::{
         ActiveGameSettings, GameInfo, LobbySettings,
-        r#match::MatchInfo,
+        r#match::{MatchInfo, MatchTerminationType},
         round::{InputPlayerAction, PlayerAction, RoundInfo, RoundTerminationType},
     },
     lobby::{LeftLobbyReason, LobbyCode, LobbyInfo, PlayerId},
@@ -24,7 +24,6 @@ pub mod session;
 
 /// a message sent from the server to a client
 #[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub enum ServerMessage {
     // only sent on server termination (like ctrl+C)
     ServerClosed,
@@ -60,7 +59,7 @@ pub enum ServerMessage {
 
     // match
     MatchStarted(MatchInfo),
-    MatchEnded,
+    MatchEnded(MatchTerminationType),
     PlayerGotRidOfCardsToPool {
         player_id: PlayerId,
         n_cards: usize,
@@ -90,7 +89,6 @@ pub enum ServerMessage {
 }
 
 #[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub enum ErrorMessage {
     InvalidClientMessage,
 
@@ -112,7 +110,6 @@ pub enum ErrorMessage {
 
 /// a message sent from a client to the server
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub enum ClientMessage {
     JoinLobby(LobbyCode),
     HostLobby,
@@ -127,7 +124,6 @@ pub enum ClientMessage {
     // not implemented
     // AddBot,
     KickPlayer(PlayerId),
-    CloseLobby,
     SetSettings(LobbySettings),
     // game
     AddNewRule,

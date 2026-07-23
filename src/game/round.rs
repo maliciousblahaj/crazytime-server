@@ -222,7 +222,6 @@ pub enum ActionChain {
 }
 
 #[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct ActionError {
     pub player: PlayerId,
     pub reason: ErrorReason,
@@ -230,7 +229,6 @@ pub struct ActionError {
 }
 
 #[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub enum RoundTerminationType {
     ErrorReported {
         reporter: PlayerId,
@@ -240,6 +238,7 @@ pub enum RoundTerminationType {
     FaultyErrorReport(PlayerId),
     HitPileLast(PlayerId),
     FaultyWinDeclaration(PlayerId),
+    Timeout(PlayerId),
     PlayerWonMatch(PlayerId),
 }
 impl RoundTerminationType {
@@ -251,13 +250,13 @@ impl RoundTerminationType {
             RoundTerminationType::FaultyErrorReport(player_id) => Some(player_id),
             RoundTerminationType::HitPileLast(player_id) => Some(player_id),
             RoundTerminationType::FaultyWinDeclaration(player_id) => Some(player_id),
+            RoundTerminationType::Timeout(player_id) => Some(player_id),
             RoundTerminationType::PlayerWonMatch(_) => None,
         }
     }
 }
 
 #[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub enum ErrorReason {
     MoveOutOfTurn,
     InvalidMove,
@@ -499,7 +498,6 @@ impl RoundState {
 }
 
 #[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct RoundInfo {
     starting_player: PlayerId,
     player_actions: Vec<PlayerAction>,
@@ -531,7 +529,6 @@ impl TimeInterval {
 }
 
 #[derive(Clone, Copy, Eq, PartialEq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub enum Count {
     Zero,
     ZeroThirty,
@@ -608,7 +605,6 @@ impl From<Time> for Count {
 
 // same as InputPlayerMove but with cards revealed, and broadcast capabilities
 #[derive(Clone, Copy, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub enum PlayerMove {
     CountAndLayCard { card: Card, count: Count },
     Count(Count),
@@ -616,7 +612,6 @@ pub enum PlayerMove {
 }
 
 #[derive(Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub enum InputPlayerAction {
     Move(InputPlayerMove),
     Hit(HitType),
@@ -625,7 +620,6 @@ pub enum InputPlayerAction {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub enum InputPlayerMove {
     CountAndLayCard(Count),
     Count(Count),
@@ -702,7 +696,6 @@ impl InputPlayerMove {
 }
 
 #[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct PlayerAction {
     pub player_id: PlayerId,
     pub time: DateTime<Utc>,
@@ -710,7 +703,6 @@ pub struct PlayerAction {
 }
 
 #[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub enum PlayerActionType {
     Move(PlayerMove),
     Hit(HitType),
@@ -732,7 +724,6 @@ impl PlayerDirection {
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "camelCase")]
 pub enum HitType {
     // hit with right hand
     Single,

@@ -64,7 +64,6 @@ pub struct Rule {
 }
 
 #[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct RuleInfo {
     id: usize,
     rule: Description,
@@ -73,7 +72,6 @@ pub struct RuleInfo {
 
 // potential future support of multiple languages
 #[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct Description {
     english: String,
 }

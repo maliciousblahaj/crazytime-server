@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 
 use chrono::{Duration, Utc};
-use rand::seq::SliceRandom;
 use replace_with::replace_with_or_abort;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedSender;
@@ -10,7 +9,7 @@ use crate::{
     ErrorMessage, ServerMessage,
     card::Card,
     game::{
-        r#match::{MatchInfo, MatchState},
+        r#match::{MatchInfo, MatchState, MatchTerminationType},
         round::{
             ActionChain, ActionChainMoves, Count, InputPlayerAction, InputPlayerMove, PlayerAction,
             PlayerActionType, PlayerMove, RoundTerminationType,
@@ -24,7 +23,6 @@ pub mod r#match;
 pub mod round;
 
 #[derive(Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct LobbySettings {
     /// the max number of players for a lobby
     pub max_players: usize,
@@ -60,7 +58,6 @@ pub struct LobbySettings {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub enum MaxCardsPickedUpWhenLosing {
     Finite(usize),
     Unlimited,
@@ -82,7 +79,6 @@ impl Default for LobbySettings {
 }
 /// game settings within a game
 #[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct ActiveGameSettings {
     /// See [`LobbySettings.expected_error_reaction_time`]
     pub expected_error_reaction_time: Duration,
@@ -253,81 +249,30 @@ impl GameState {
                     &current_match.players,
                     time,
                 ) {
-                    let revealed_card_stacks = current_round.revealed_card_stacks.clone();
-                    current_round.round_termination = Some(round_termination.clone());
-                    current_match
-                        .previous_rounds
-                        .push(current_match.current_round.take().unwrap());
-                    broadcaster.broadcast(ServerMessage::RoundEnded(round_termination.clone()));
-                    let guilty = match round_termination {
-                        RoundTerminationType::ErrorReported { reporter, errors } => {
-                            if self.settings.cards_removed_at_correct_error_report > 0 {
-                                let cards = current_match.players.take_cards(
-                                    &reporter,
-                                    self.settings.cards_removed_at_correct_error_report,
-                                );
-                                if !cards.is_empty() {
-                                    broadcaster.broadcast(
-                                        ServerMessage::PlayerGotRidOfCardsToPool {
-                                            player_id: reporter,
-                                            n_cards: cards.len(),
-                                        },
-                                    );
-                                    current_match.card_pool.add_cards(cards.into_iter());
-                                }
-                            }
-                            errors.last().unwrap().player
+                    if current_match.round_terminated(
+                        round_termination,
+                        broadcaster,
+                        &self.settings,
+                    ) {
+                        self.previous_matches
+                            .push(self.current_match.take().unwrap());
+                        if let Ok(rule_info) = self.rule_manager.add_rule() {
+                            broadcaster.broadcast(ServerMessage::RuleAdded(rule_info));
                         }
-                        RoundTerminationType::FaultyErrorReport(player_id) => player_id,
-                        RoundTerminationType::HitPileLast(player_id) => player_id,
-                        RoundTerminationType::FaultyWinDeclaration(player_id) => player_id,
-                        RoundTerminationType::PlayerWonMatch(player_id) => {
-                            current_match.winner = Some(player_id);
-                            self.previous_matches
-                                .push(self.current_match.take().unwrap());
-                            broadcaster.broadcast(ServerMessage::MatchEnded);
-                            if let Ok(rule_info) = self.rule_manager.add_rule() {
-                                broadcaster.broadcast(ServerMessage::RuleAdded(rule_info));
-                            }
-                            if let Some(duration) = self.settings.auto_start_match {
-                                let lobby_tx = self.lobby_tx.clone();
-                                tokio::spawn(async move {
-                                    tokio::time::sleep(duration).await;
-                                    lobby_tx
-                                        .send(InternalLobbyMessage::AutoMessage(
-                                            AutoMessage::AutoStartMatch,
-                                        ))
-                                        .inspect_err(|e| tracing::error!(error = %e))
-                                        .ok();
-                                });
-                            }
-                            return;
+                        if let Some(duration) = self.settings.auto_start_match {
+                            let lobby_tx = self.lobby_tx.clone();
+                            tokio::spawn(async move {
+                                tokio::time::sleep(duration).await;
+                                lobby_tx
+                                    .send(InternalLobbyMessage::AutoMessage(
+                                        AutoMessage::AutoStartMatch,
+                                    ))
+                                    .inspect_err(|e| tracing::error!(error = %e))
+                                    .ok();
+                            });
                         }
-                    };
-                    let mut revealed_cards: Vec<Card> = revealed_card_stacks
-                        .into_iter()
-                        .flat_map(|card_stack| card_stack.1.into_iter())
-                        .collect();
-                    revealed_cards.shuffle(&mut rand::rng());
-                    let picked_up_cards = match self.settings.max_cards_picked_up_when_losing {
-                        MaxCardsPickedUpWhenLosing::Finite(n) => {
-                            revealed_cards.split_off(revealed_cards.len().saturating_sub(n))
-                        }
-                        MaxCardsPickedUpWhenLosing::Unlimited => {
-                            std::mem::take(&mut revealed_cards)
-                        }
-                    };
-                    broadcaster.broadcast(ServerMessage::PlayerPickedUpRevealedCards {
-                        player_id,
-                        n_cards: picked_up_cards.len(),
-                    });
-                    current_match
-                        .players
-                        .add_cards_to_hand(&guilty, picked_up_cards);
-                    current_match
-                        .card_pool
-                        .add_cards(revealed_cards.into_iter());
-
+                        return;
+                    }
                     if let Some(duration) = self.settings.auto_start_round {
                         let lobby_tx = self.lobby_tx.clone();
                         tokio::spawn(async move {
@@ -351,11 +296,17 @@ impl GameState {
                         players: current_match.players.get_player_vec(),
                         n_cards_in_pool: current_match.card_pool.n_cards(),
                         // current_move: &player_move,
-                        previous_match_winner: self
-                            .previous_matches
-                            .last()
-                            .map(|match_state| match_state.winner)
-                            .flatten(),
+                        previous_match_winner: self.previous_matches.iter().rev().find_map(
+                            |state| {
+                                if let Some(MatchTerminationType::PlayerWonMatch(player)) =
+                                    state.match_termination
+                                {
+                                    Some(player)
+                                } else {
+                                    None
+                                }
+                            },
+                        ),
                         // round_starting_player: &current_round.starting_player,
                         // player_actions: &current_round.player_actions,
                         previous_moves: &current_round.get_previous_moves(),
@@ -400,16 +351,49 @@ impl GameState {
         }
     }
 
-    pub fn handle_auto_message(&mut self, message: AutoMessage) {
+    pub fn handle_auto_message(&mut self, message: AutoMessage, broadcaster: &LobbyBroadcaster) {
         match message {
-            AutoMessage::ActionTimeout => {
-                // TODO
+            AutoMessage::ActionTimeout(player_id) => {
+                if let Some(ref mut current_match) = self.current_match {
+                    let round_termination = RoundTerminationType::Timeout(player_id);
+                    current_match.round_terminated(round_termination, broadcaster, &self.settings);
+
+                    if let Some(duration) = self.settings.auto_start_round {
+                        let lobby_tx = self.lobby_tx.clone();
+                        tokio::spawn(async move {
+                            tokio::time::sleep(duration).await;
+                            lobby_tx
+                                .send(InternalLobbyMessage::AutoMessage(
+                                    AutoMessage::AutoStartRound,
+                                ))
+                                .inspect_err(|e| tracing::error!(error = %e))
+                                .ok();
+                        });
+                    }
+                }
             }
             AutoMessage::AutoStartMatch => {
                 // TODO
             }
             AutoMessage::AutoStartRound => {
                 // TODO
+            }
+        }
+    }
+
+    pub fn handle_player_left(&mut self, player: &PlayerId, broadcaster: &LobbyBroadcaster) {
+        if let Some(ref mut current_match) = self.current_match
+            && let Some(card_pile) = current_match.players.remove_player(player)
+        {
+            if current_match.players.len() < 3 {
+                current_match.match_termination = Some(MatchTerminationType::MatchCancelled);
+                self.previous_matches
+                    .push(self.current_match.take().unwrap());
+                broadcaster.broadcast(ServerMessage::MatchEnded(
+                    MatchTerminationType::MatchCancelled,
+                ));
+            } else {
+                current_match.card_pool.add_cards(card_pile.into_iter());
             }
         }
     }
@@ -432,11 +416,14 @@ impl GameState {
                 .current_match
                 .as_ref()
                 .map(|current_match| current_match.info()),
-            last_match_winner: self
-                .previous_matches
-                .last()
-                .map(|state| state.winner)
-                .flatten(),
+            last_match_winner: self.previous_matches.iter().rev().find_map(|state| {
+                if let Some(MatchTerminationType::PlayerWonMatch(player)) = state.match_termination
+                {
+                    Some(player)
+                } else {
+                    None
+                }
+            }),
             active_rules: self.rule_manager.active_rules_info(),
         }
     }
@@ -520,7 +507,6 @@ impl<'a> GameContext<'a> {
 
 // fetched on request
 #[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct GameInfo {
     pub settings: ActiveGameSettings,
     pub current_match: Option<MatchInfo>,

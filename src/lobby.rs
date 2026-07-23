@@ -1,7 +1,9 @@
 use crate::{
     ErrorMessage, ServerMessage, SessionId,
     game::{
-        GameInfo, GameMessage, GameState, LobbySettings, r#match::MatchState, round::RoundState,
+        GameInfo, GameMessage, GameState, LobbySettings,
+        r#match::{MatchState, MatchTerminationType},
+        round::RoundState,
     },
 };
 use rand::RngExt;
@@ -69,7 +71,6 @@ pub async fn lobby_task(
                         lobby.session_offline(session_id);
                     },
                     InternalLobbyMessage::PlayerLeft(session_id) => {
-
                         remove_session_tx.send(session_id).inspect_err(|e| tracing::error!(error = %e)).ok();
                         if lobby.session_left(session_id, LeftLobbyReason::Left) {
                             break 'lobby_runtime;
@@ -88,6 +89,7 @@ pub struct Lobby {
     lobby_tx: UnboundedSender<InternalLobbyMessage>,
     pub host: PlayerId,
 
+    // pub auto_message_handler: JoinHandle<()>,
     /// next public player id, for incremental assignment
     pub next_player_id: usize,
 
@@ -244,10 +246,20 @@ impl Lobby {
                                 .unwrap()
                                 .get_loser()
                                 .unwrap(),
-                            None => match game_state.previous_matches.last() {
-                                Some(match_state) => match_state.winner.unwrap(),
-                                None => self.host,
-                            },
+                            None => {
+                                match game_state.previous_matches.iter().rev().find_map(|state| {
+                                    if let Some(MatchTerminationType::PlayerWonMatch(player)) =
+                                        state.match_termination
+                                    {
+                                        Some(player)
+                                    } else {
+                                        None
+                                    }
+                                }) {
+                                    Some(winner) => winner,
+                                    None => self.host,
+                                }
+                            }
                         };
                         let current_round = RoundState::new(starting_player);
                         self.broadcaster
@@ -322,11 +334,6 @@ impl Lobby {
                         // TODO not implemented
                         return false;
                     }
-                    HostMessage::CloseLobby => {
-                        self.broadcaster
-                            .broadcast(ServerMessage::LeftLobby(LeftLobbyReason::LobbyClosed));
-                        return true;
-                    }
                 }
             }
         }
@@ -335,7 +342,7 @@ impl Lobby {
 
     fn handle_auto_message(&mut self, message: AutoMessage) {
         if let Some(ref mut game_state) = self.game_state {
-            game_state.handle_auto_message(message);
+            game_state.handle_auto_message(message, &self.broadcaster);
         }
     }
 
@@ -363,6 +370,9 @@ impl Lobby {
             self.broadcaster
                 .broadcast(ServerMessage::HostChanged(self.host));
         }
+        if let Some(ref mut game_state) = self.game_state {
+            game_state.handle_player_left(&player_id, &self.broadcaster);
+        }
 
         false
     }
@@ -381,7 +391,6 @@ impl Lobby {
 
 // this is fetched on connecting to a lobby
 #[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct LobbyInfo {
     you: PlayerId,
     lobby_code: LobbyCode,
@@ -407,12 +416,11 @@ pub enum HostMessage {
     // not implemented
     // AddBot,
     KickPlayer(PlayerId),
-    CloseLobby,
     SetSettings(LobbySettings),
 }
 
 pub enum AutoMessage {
-    ActionTimeout,
+    ActionTimeout(PlayerId),
     AutoStartMatch,
     AutoStartRound,
 }
@@ -432,17 +440,14 @@ pub enum InternalLobbyMessage {
 }
 
 #[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub enum LeftLobbyReason {
     Left,
-    LobbyClosed,
     KickedByHost,
     Disconnected,
 }
 
 /// the public incremental id everyone in the lobby knows
 #[derive(Clone, Copy, Eq, PartialEq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct PlayerId(usize);
 
 impl From<usize> for PlayerId {
@@ -452,7 +457,6 @@ impl From<usize> for PlayerId {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct LobbyCode(String);
 
 impl LobbyCode {

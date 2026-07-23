@@ -1,11 +1,13 @@
 use crate::{
+    ServerMessage,
     card::{Card, CardPool},
     game::{
-        PlayerId,
-        round::{RoundInfo, RoundState},
+        ActiveGameSettings, MaxCardsPickedUpWhenLosing, PlayerId,
+        round::{RoundInfo, RoundState, RoundTerminationType},
     },
-    lobby::LobbyPlayers,
+    lobby::{LobbyBroadcaster, LobbyPlayers},
 };
+use rand::seq::SliceRandom;
 use serde::Serialize;
 use std::collections::HashMap;
 
@@ -15,7 +17,7 @@ pub struct MatchState {
     pub previous_rounds: Vec<RoundState>,
     pub current_round: Option<RoundState>,
     // if the round is finished
-    pub winner: Option<PlayerId>,
+    pub match_termination: Option<MatchTerminationType>,
 }
 
 impl MatchState {
@@ -34,7 +36,7 @@ impl MatchState {
             players: MatchPlayers::from_player_hands(player_hands),
             previous_rounds: Vec::new(),
             current_round: None,
-            winner: None,
+            match_termination: None,
         })
     }
 
@@ -50,15 +52,89 @@ impl MatchState {
             current_round: self.current_round.as_ref().map(|round| round.info()),
         }
     }
+
+    /// returns Some if the match terminated as well (aka if input round termination is playerwonmatch, where the
+    /// match termination is already broadcasted, so don't worry about that, only remove the match from current)
+    ///
+    /// doesn't initiate autostartround or autostartmatch
+    pub fn round_terminated(
+        &mut self,
+        round_termination: RoundTerminationType,
+        broadcaster: &LobbyBroadcaster,
+        game_settings: &ActiveGameSettings,
+    ) -> bool {
+        let Some(mut current_round) = self.current_round.take() else {
+            return false;
+        };
+
+        current_round.round_termination = Some(round_termination.clone());
+        let revealed_card_stacks = current_round.revealed_card_stacks.clone();
+        self.previous_rounds.push(current_round);
+
+        broadcaster.broadcast(ServerMessage::RoundEnded(round_termination.clone()));
+        let guilty = match round_termination {
+            RoundTerminationType::ErrorReported { reporter, errors } => {
+                if game_settings.cards_removed_at_correct_error_report > 0 {
+                    let cards = self.players.take_cards(
+                        &reporter,
+                        game_settings.cards_removed_at_correct_error_report,
+                    );
+                    if !cards.is_empty() {
+                        broadcaster.broadcast(ServerMessage::PlayerGotRidOfCardsToPool {
+                            player_id: reporter,
+                            n_cards: cards.len(),
+                        });
+                        self.card_pool.add_cards(cards.into_iter());
+                    }
+                }
+                errors.last().unwrap().player
+            }
+            RoundTerminationType::FaultyErrorReport(player_id) => player_id,
+            RoundTerminationType::HitPileLast(player_id) => player_id,
+            RoundTerminationType::FaultyWinDeclaration(player_id) => player_id,
+            RoundTerminationType::Timeout(player_id) => player_id,
+            RoundTerminationType::PlayerWonMatch(player_id) => {
+                let match_termination = MatchTerminationType::PlayerWonMatch(player_id);
+                self.match_termination = Some(match_termination.clone());
+                broadcaster.broadcast(ServerMessage::MatchEnded(match_termination));
+                return true;
+            }
+        };
+        let mut revealed_cards: Vec<Card> = revealed_card_stacks
+            .into_iter()
+            .flat_map(|card_stack| card_stack.1.into_iter())
+            .collect();
+        revealed_cards.shuffle(&mut rand::rng());
+        let picked_up_cards = match game_settings.max_cards_picked_up_when_losing {
+            MaxCardsPickedUpWhenLosing::Finite(n) => {
+                revealed_cards.split_off(revealed_cards.len().saturating_sub(n))
+            }
+            MaxCardsPickedUpWhenLosing::Unlimited => std::mem::take(&mut revealed_cards),
+        };
+        broadcaster.broadcast(ServerMessage::PlayerPickedUpRevealedCards {
+            player_id: guilty,
+            n_cards: picked_up_cards.len(),
+        });
+        self.players.add_cards_to_hand(&guilty, picked_up_cards);
+        self.card_pool.add_cards(revealed_cards.into_iter());
+
+        false
+    }
 }
 
 /// is sent when a new match starts, or a connection is aquired to a lobby with an existing match
 #[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct MatchInfo {
     players: Vec<(PlayerId, usize)>,
     n_cards_in_pool: usize,
     current_round: Option<RoundInfo>,
+}
+
+#[derive(Clone, Serialize)]
+pub enum MatchTerminationType {
+    PlayerWonMatch(PlayerId),
+    /// happens if someone leaves and the lobby ends up with fewer than 3 people
+    MatchCancelled,
 }
 
 #[derive(Default)]
@@ -73,6 +149,7 @@ impl MatchPlayers {
         Self::default()
     }
 
+    /// the number of players
     pub fn len(&self) -> usize {
         self.players.len()
     }
