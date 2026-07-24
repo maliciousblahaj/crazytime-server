@@ -4,6 +4,7 @@
 A (blazingly fast) crazytime server written in rust
 
 ### TODO
+- match cancel by host
 - better error handling
 - more bug hunting and actual user testing
 

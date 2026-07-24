@@ -5,6 +5,7 @@ use serde::Serialize;
 
 use crate::game::round::{Count, TimeInterval};
 
+#[derive(Debug)]
 pub struct CardPool(VecDeque<Card>);
 
 impl CardPool {
@@ -289,7 +290,7 @@ impl CardPool {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct Card {
     pub clock: ClockType,
     pub time: Time,
@@ -314,7 +315,7 @@ impl Card {
     }
 }
 
-#[derive(Clone, Copy, Eq, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
 pub enum ClockType {
     Sun,
     Hourglass,
@@ -326,7 +327,7 @@ pub enum ClockType {
     TimeMachine,
 }
 
-#[derive(Clone, Copy, PartialOrd, Ord, Eq, Hash, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialOrd, Ord, Eq, Hash, PartialEq, Serialize)]
 pub enum Time {
     One,
     OneThirty,
@@ -430,7 +431,7 @@ impl Time {
     }
     pub fn plus(&self, time_interval: &TimeInterval) -> Self {
         let index = self.get_index();
-        let new_index = (index as isize + time_interval.0).rem_euclid(24) as usize;
+        let new_index = (index as isize + time_interval.0.get()).rem_euclid(24) as usize;
         Self::ALL[new_index]
     }
 }

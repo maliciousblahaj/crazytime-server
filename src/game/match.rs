@@ -11,6 +11,7 @@ use rand::seq::SliceRandom;
 use serde::Serialize;
 use std::collections::HashMap;
 
+#[derive(Debug)]
 pub struct MatchState {
     pub card_pool: CardPool,
     pub players: MatchPlayers,
@@ -33,7 +34,7 @@ impl MatchState {
             .collect();
         Ok(Self {
             card_pool,
-            players: MatchPlayers::from_player_hands(player_hands),
+            players: MatchPlayers::new(lobby_players.players().copied().collect(), player_hands),
             previous_rounds: Vec::new(),
             current_round: None,
             match_termination: None,
@@ -130,14 +131,14 @@ pub struct MatchInfo {
     current_round: Option<RoundInfo>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub enum MatchTerminationType {
     PlayerWonMatch(PlayerId),
-    /// happens if someone leaves and the lobby ends up with fewer than 3 people
+    /// happens if someone leaves and the lobby ends up with fewer than 3 people, or if the host cancels
     MatchCancelled,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct MatchPlayers {
     /// all match players in order
     players: Vec<PlayerId>,
@@ -145,20 +146,25 @@ pub struct MatchPlayers {
 }
 
 impl MatchPlayers {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// the number of players
-    pub fn len(&self) -> usize {
-        self.players.len()
-    }
-
-    pub fn from_player_hands(hands: HashMap<PlayerId, Vec<Card>>) -> Self {
+    pub fn new(player_order: Vec<PlayerId>, hands: HashMap<PlayerId, Vec<Card>>) -> Self {
+        if hands.len() != player_order.len() {
+            // panics here because this is a critical bug if it ever gets to this point
+            panic!("matchplayers parameter invariant broken!!");
+        }
+        for player in player_order.iter() {
+            // panics here because this is a critical bug if it ever gets to this point
+            if !hands.contains_key(player) {
+                panic!("matchplayers parameter invariant broken!!");
+            }
+        }
         Self {
-            players: hands.keys().copied().collect(),
+            players: player_order,
             hands,
         }
+    }
+    /// the number of players
+    pub fn n_players(&self) -> usize {
+        self.players.len()
     }
 
     pub fn get_player_vec(&self) -> &Vec<PlayerId> {

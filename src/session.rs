@@ -9,10 +9,7 @@ use tokio_util::task::JoinMap;
 use crate::{
     ClientMessage, ErrorMessage, ServerMessage, SessionId,
     game::GameMessage,
-    lobby::{
-        ConnectionTx, HostMessage, InternalLobbyMessage, LeftLobbyReason, LobbyCode, LobbyMessage,
-        lobby_task,
-    },
+    lobby::{ConnectionTx, HostMessage, InternalLobbyMessage, LobbyCode, LobbyMessage, lobby_task},
 };
 
 pub async fn lobby_coordinator_task(
@@ -38,7 +35,7 @@ pub async fn lobby_coordinator_task(
                 session_lobby_map.retain(|_session, lobby| lobby != &lobby_code);
             }
 
-            // if a session has been disconnected from the lobby for too long, and removed from a lobby, the lobby sends this signal
+            // if a session is removed from a lobby, the lobby sends this signal
             Some(session_id) = remove_session_rx.recv() => {
                 session_lobby_map.remove(&session_id);
             }
@@ -48,14 +45,14 @@ pub async fn lobby_coordinator_task(
                     LobbyCoordinatorMessage::SessionConnected { session_id, connection_tx } => {
                         active_sessions.insert(session_id, connection_tx.clone());
                         if let Some(lobby_code) = session_lobby_map.get(&session_id) {
-                            lobby_senders.get(lobby_code).unwrap().send(InternalLobbyMessage::PlayerConnected { session_id, connection_tx })
+                            lobby_senders.get(lobby_code).unwrap().send(InternalLobbyMessage::SessionConnected { session_id, connection_tx })
                                     .inspect_err(|e| tracing::error!(error = %e)).ok();
                         }
                     }
                     LobbyCoordinatorMessage::SessionDisconnected(session_id) => {
                         active_sessions.remove(&session_id);
                         if let Some(lobby_code) = session_lobby_map.get(&session_id) {
-                            lobby_senders.get(lobby_code).unwrap().send(InternalLobbyMessage::PlayerOffline(session_id))
+                            lobby_senders.get(lobby_code).unwrap().send(InternalLobbyMessage::SessionOffline(session_id))
                                     .inspect_err(|e| tracing::error!(error = %e)).ok();
                         }
                     }
@@ -73,7 +70,7 @@ pub async fn lobby_coordinator_task(
                                         .inspect_err(|e| tracing::error!(error = %e)).ok();
                                     continue 'runtime;
                                 };
-                                sender.send(InternalLobbyMessage::PlayerConnected{session_id: session_id, connection_tx: connection_tx.clone()}).inspect_err(|e| tracing::error!(error = %e)).ok();
+                                sender.send(InternalLobbyMessage::SessionConnected{session_id: session_id, connection_tx: connection_tx.clone()}).inspect_err(|e| tracing::error!(error = %e)).ok();
 
                                 session_lobby_map.insert(session_id, lobby_code.clone());
                             },
@@ -97,22 +94,11 @@ pub async fn lobby_coordinator_task(
                                 lobby_senders.insert(lobby_code.clone(), lobby_tx);
                                 session_lobby_map.insert(session_id, lobby_code.clone());
                             },
-                            ClientMessage::LeaveLobby => {
-                                let Some(lobby_code) = session_lobby_map.get(&session_id) else {
-                                    connection_tx.send(ServerMessage::Error(ErrorMessage::NotInLobby))
-                                        .inspect_err(|e| tracing::error!(error = %e)).ok();
-                                    continue 'runtime;
-                                };
-                                let sender = lobby_senders.get(lobby_code).unwrap();
-                                sender.send(InternalLobbyMessage::PlayerLeft(session_id)).inspect_err(|e| tracing::error!(error = %e)).ok();
-
-                                session_lobby_map.remove(&session_id);
-                                connection_tx.send(ServerMessage::LeftLobby(LeftLobbyReason::Left))
-                                        .inspect_err(|e| tracing::error!(error = %e)).ok();
-                            }
+                            // messages where you're supposed to already be in a lobby
                             message => {
                                 // transfer flattened client message to lobby message
                                 let message = match message {
+                                    ClientMessage::LeaveLobby => LobbyMessage::LeaveLobby,
                                     ClientMessage::FetchLobbyInfo => LobbyMessage::FetchLobbyInfo,
                                     ClientMessage::StartGame => LobbyMessage::HostMessage(HostMessage::StartGame),
                                     ClientMessage::StartMatch => LobbyMessage::HostMessage(HostMessage::StartMatch),

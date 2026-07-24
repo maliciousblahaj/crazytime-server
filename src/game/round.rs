@@ -6,8 +6,13 @@ use crate::{
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    num::NonZeroIsize,
+};
+use tokio::task::AbortHandle;
 
+#[derive(Debug)]
 pub struct RoundState {
     pub starting_player: PlayerId,
 
@@ -24,6 +29,8 @@ pub struct RoundState {
 
     // for when a round is finished
     pub round_termination: Option<RoundTerminationType>,
+
+    pub move_timeout_task: Option<AbortHandle>,
 }
 
 impl RoundState {
@@ -46,6 +53,7 @@ impl RoundState {
                 },
             },
             round_termination: None,
+            move_timeout_task: None,
         }
     }
 
@@ -83,6 +91,7 @@ impl RoundState {
 // deterministic action is, but insert a fixed move set in front of it that inverts it, and continue doing
 // this constantly (since the effect lasts forever)
 
+#[derive(Debug)]
 pub struct MoveManager {
     pub count_interval: TimeInterval,
     // im thinking if it might be not the best idea to make this a VecDeque, maybe it should only be
@@ -155,6 +164,7 @@ impl MoveManager {
     }
 }
 
+#[derive(Debug)]
 pub struct TurnManager {
     starting_player: PlayerId,
     pub direction: PlayerDirection,
@@ -176,23 +186,34 @@ impl TurnManager {
                 return false;
             }
         }
-        let next_player = if let Some(previous_player) = previous_player {
-            let previous_player_idx = match_players.get_index(previous_player).unwrap();
+        let next_players = self.get_expected_players(previous_player, match_players);
 
-            *match_players
+        next_players.contains(&player)
+    }
+
+    pub fn set_next_player(&mut self, player: PlayerId) {
+        self.next_player = Some(HashSet::from([player]));
+    }
+
+    pub fn get_expected_players(
+        &self,
+        previous_player: Option<&PlayerId>,
+        match_players: &MatchPlayers,
+    ) -> HashSet<PlayerId> {
+        if let Some(ref allowed_players) = self.next_player {
+            return allowed_players.clone();
+        }
+        if let Some(previous_player) = previous_player {
+            let previous_player_idx = match_players.get_index(previous_player).unwrap();
+            HashSet::from([*match_players
                 .get(
                     (previous_player_idx as isize + self.direction.0)
                         .rem_euclid(match_players.len() as isize) as usize,
                 )
-                .unwrap()
+                .unwrap()])
         } else {
-            self.starting_player
-        };
-
-        player == next_player
-    }
-    pub fn set_next_player(&mut self, player: PlayerId) {
-        self.next_player = Some(HashSet::from([player]));
+            HashSet::from([self.starting_player])
+        }
     }
 }
 
@@ -204,6 +225,7 @@ pub struct ActionChainMoves {
 }
 
 /// The correct chain of actions in a state
+#[derive(Debug)]
 pub enum ActionChain {
     Moves {
         previous_moves: Vec<ValidInputPlayerMove>,
@@ -221,14 +243,14 @@ pub enum ActionChain {
     },
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ActionError {
     pub player: PlayerId,
     pub reason: ErrorReason,
     pub occured: DateTime<Utc>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub enum RoundTerminationType {
     ErrorReported {
         reporter: PlayerId,
@@ -256,7 +278,7 @@ impl RoundTerminationType {
     }
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub enum ErrorReason {
     MoveOutOfTurn,
     InvalidMove,
@@ -506,17 +528,17 @@ pub struct RoundInfo {
 
 /// in half an hour steps
 /// supports negative numbers for backwards counting
-#[derive(Copy, Clone)]
-pub struct TimeInterval(pub isize);
+#[derive(Debug, Copy, Clone)]
+pub struct TimeInterval(pub NonZeroIsize);
 impl TimeInterval {
-    pub const MINUSTHREEHOURS: Self = Self(-6);
-    pub const MINUSTWOHOURS: Self = Self(-4);
-    pub const MINUSONEHOUR: Self = Self(-2);
-    pub const MINUSTHIRTYMINUTES: Self = Self(-1);
-    pub const THIRTYMINUTES: Self = Self(1);
-    pub const ONEHOUR: Self = Self(2);
-    pub const TWOHOURS: Self = Self(4);
-    pub const THREEHOURS: Self = Self(6);
+    pub const MINUSTHREEHOURS: Self = Self(NonZeroIsize::new(-6).unwrap());
+    pub const MINUSTWOHOURS: Self = Self(NonZeroIsize::new(-4).unwrap());
+    pub const MINUSONEHOUR: Self = Self(NonZeroIsize::new(-2).unwrap());
+    pub const MINUSTHIRTYMINUTES: Self = Self(NonZeroIsize::new(-1).unwrap());
+    pub const THIRTYMINUTES: Self = Self(NonZeroIsize::new(1).unwrap());
+    pub const ONEHOUR: Self = Self(NonZeroIsize::new(2).unwrap());
+    pub const TWOHOURS: Self = Self(NonZeroIsize::new(4).unwrap());
+    pub const THREEHOURS: Self = Self(NonZeroIsize::new(6).unwrap());
 
     pub fn toggle_direction(&mut self) {
         self.0 = -self.0
@@ -524,11 +546,11 @@ impl TimeInterval {
     /// ignores negative values and uses the absolute value
     /// retains the interval direction
     pub fn set_step_size(&mut self, step_size: TimeInterval) {
-        self.0 = self.0.signum() * step_size.0.abs();
+        self.0 = NonZeroIsize::new(self.0.get().signum() * step_size.0.get().abs()).unwrap();
     }
 }
 
-#[derive(Clone, Copy, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub enum Count {
     Zero,
     ZeroThirty,
@@ -604,7 +626,7 @@ impl From<Time> for Count {
 }
 
 // same as InputPlayerMove but with cards revealed, and broadcast capabilities
-#[derive(Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize)]
 pub enum PlayerMove {
     CountAndLayCard { card: Card, count: Count },
     Count(Count),
@@ -625,12 +647,13 @@ pub enum InputPlayerMove {
     Count(Count),
     LayCard,
 }
+#[derive(Debug)]
 pub struct ValidInputPlayerMove {
     pub player: PlayerId,
     pub r#type: ValidInputPlayerMoveType,
 }
 
-#[derive(PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub enum ValidInputPlayerMoveType {
     CountAndLayCard(ValidCount),
     Count(ValidCount),
@@ -652,7 +675,7 @@ impl TryFrom<InputPlayerMove> for ValidInputPlayerMoveType {
     }
 }
 
-#[derive(Clone, Copy, Eq, PartialEq, Hash)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 pub enum ValidCount {
     Time(Time),
     NameOfThisRule,
@@ -695,14 +718,14 @@ impl InputPlayerMove {
     }
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct PlayerAction {
     pub player_id: PlayerId,
     pub time: DateTime<Utc>,
     pub r#type: PlayerActionType,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub enum PlayerActionType {
     Move(PlayerMove),
     Hit(HitType),
@@ -711,7 +734,7 @@ pub enum PlayerActionType {
 }
 
 /// the index offset to use
-#[derive(Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct PlayerDirection(pub isize);
 
 impl PlayerDirection {
@@ -723,7 +746,7 @@ impl PlayerDirection {
     }
 }
 
-#[derive(Clone, Copy, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, PartialEq)]
 pub enum HitType {
     // hit with right hand
     Single,

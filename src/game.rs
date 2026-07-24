@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use chrono::{Duration, Utc};
 use replace_with::replace_with_or_abort;
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::{sync::mpsc::UnboundedSender, time::sleep};
 
 use crate::{
     ErrorMessage, ServerMessage,
@@ -12,17 +12,17 @@ use crate::{
         r#match::{MatchInfo, MatchState, MatchTerminationType},
         round::{
             ActionChain, ActionChainMoves, Count, InputPlayerAction, InputPlayerMove, PlayerAction,
-            PlayerActionType, PlayerMove, RoundTerminationType,
+            PlayerActionType, PlayerMove,
         },
     },
-    lobby::{AutoMessage, InternalLobbyMessage, LobbyBroadcaster, PlayerId},
+    lobby::{AutoMessage, InternalLobbyMessage, LobbyBroadcaster, LobbyPlayers, PlayerId},
     rules::{RuleInfo, RuleManager},
 };
 
 pub mod r#match;
 pub mod round;
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LobbySettings {
     /// the max number of players for a lobby
     pub max_players: usize,
@@ -57,7 +57,7 @@ pub struct LobbySettings {
     pub auto_start_round: Option<std::time::Duration>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MaxCardsPickedUpWhenLosing {
     Finite(usize),
     Unlimited,
@@ -78,7 +78,7 @@ impl Default for LobbySettings {
     }
 }
 /// game settings within a game
-#[derive(Clone, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ActiveGameSettings {
     /// See [`LobbySettings.expected_error_reaction_time`]
     pub expected_error_reaction_time: Duration,
@@ -149,6 +149,7 @@ impl From<&LobbySettings> for ActiveGameSettings {
     }
 }
 
+#[derive(Debug)]
 pub struct GameState {
     pub settings: ActiveGameSettings,
     pub current_match: Option<MatchState>,
@@ -239,6 +240,9 @@ impl GameState {
                     r#type: player_action_type.clone(),
                 };
                 current_round.player_actions.push(player_action.clone());
+                if let Some(timeout_task) = current_round.move_timeout_task.take() {
+                    timeout_task.abort();
+                }
                 broadcaster.broadcast(ServerMessage::ActionPerformed(player_action));
 
                 // check rules and do server verification of action, and broadcast accordingly
@@ -321,24 +325,24 @@ impl GameState {
                             &mut current_round.action_chain,
                             |mut action_chain| {
                                 for mut effect in active_effects.into_iter().rev() {
-                                    let ActionChain::Moves {
+                                    // if a prior effect changed this to a hit pile or whatever, don't run any further effects
+                                    if let ActionChain::Moves {
                                         previous_moves,
                                         turn_manager,
                                         move_manager,
                                     } = action_chain
-                                    else {
-                                        panic!("impossible!!");
-                                    };
-                                    action_chain = (*effect.handler)(
-                                        ActionChainMoves {
-                                            previous_moves,
-                                            turn_manager,
-                                            move_manager,
-                                        },
-                                        &game_ctx,
-                                    );
-                                    if !effect.duration.decrease() {
-                                        kept_effects.push(effect);
+                                    {
+                                        action_chain = (*effect.handler)(
+                                            ActionChainMoves {
+                                                previous_moves,
+                                                turn_manager,
+                                                move_manager,
+                                            },
+                                            &game_ctx,
+                                        );
+                                        if !effect.duration.decrease() {
+                                            kept_effects.push(effect);
+                                        }
                                     }
                                 }
                                 action_chain
@@ -347,29 +351,69 @@ impl GameState {
                         kept_effects
                     });
                 }
+
+                // start new timer
+                current_round.move_timeout_task = Some(
+                    tokio::spawn({
+                        let lobby_tx = self.lobby_tx.clone();
+                        let action_timeout_rate = self.settings.action_timeout_rate.clone();
+                        async move {
+                            sleep(action_timeout_rate).await;
+                            lobby_tx
+                                .send(InternalLobbyMessage::AutoMessage(
+                                    AutoMessage::ActionTimeout,
+                                ))
+                                .inspect_err(|e| tracing::error!(error = %e))
+                                .ok();
+                        }
+                    })
+                    .abort_handle(),
+                )
             }
         }
     }
 
     pub fn handle_auto_message(&mut self, message: AutoMessage, broadcaster: &LobbyBroadcaster) {
         match message {
-            AutoMessage::ActionTimeout(player_id) => {
-                if let Some(ref mut current_match) = self.current_match {
-                    let round_termination = RoundTerminationType::Timeout(player_id);
-                    current_match.round_terminated(round_termination, broadcaster, &self.settings);
+            AutoMessage::ActionTimeout => {
+                if let Some(ref mut current_match) = self.current_match
+                    && let Some(ref mut current_round) = current_match.current_round
+                {
+                    let guilty = match &current_round.action_chain {
+                        ActionChain::Moves {
+                            turn_manager,
+                            previous_moves,
+                            ..
+                        } => turn_manager.get_expected_players(
+                            previous_moves.last().map(|player_move| &player_move.player),
+                            &current_match.players,
+                        ),
+                        ActionChain::Hit { players, .. } => players.clone(),
+                        ActionChain::ReportError { .. } => current_match
+                            .players
+                            .get_player_vec()
+                            .iter()
+                            .copied()
+                            .collect(),
+                    };
+                    // TODO decide if everyone loses the round or if one person is chosen at random to lose
+                    // probably everyone should lose the round
 
-                    if let Some(duration) = self.settings.auto_start_round {
-                        let lobby_tx = self.lobby_tx.clone();
-                        tokio::spawn(async move {
-                            tokio::time::sleep(duration).await;
-                            lobby_tx
-                                .send(InternalLobbyMessage::AutoMessage(
-                                    AutoMessage::AutoStartRound,
-                                ))
-                                .inspect_err(|e| tracing::error!(error = %e))
-                                .ok();
-                        });
-                    }
+                    // let round_termination = RoundTerminationType::Timeout(player_id);
+                    // current_match.round_terminated(round_termination, broadcaster, &self.settings);
+
+                    // if let Some(duration) = self.settings.auto_start_round {
+                    //     let lobby_tx = self.lobby_tx.clone();
+                    //     tokio::spawn(async move {
+                    //         tokio::time::sleep(duration).await;
+                    //         lobby_tx
+                    //             .send(InternalLobbyMessage::AutoMessage(
+                    //                 AutoMessage::AutoStartRound,
+                    //             ))
+                    //             .inspect_err(|e| tracing::error!(error = %e))
+                    //             .ok();
+                    //     });
+                    // }
                 }
             }
             AutoMessage::AutoStartMatch => {
@@ -394,6 +438,7 @@ impl GameState {
                 ));
             } else {
                 current_match.card_pool.add_cards(card_pile.into_iter());
+                // TODO fix action chain and RoundState which still both reference the PlayerId
             }
         }
     }
@@ -426,6 +471,32 @@ impl GameState {
             }),
             active_rules: self.rule_manager.active_rules_info(),
         }
+    }
+}
+
+pub enum StartMatchError {
+    AlreadyOngoingMatch,
+    TooHighNCardsPerPlayer,
+    TooFewPlayers,
+}
+
+impl GameState {
+    pub fn start_match(
+        &mut self,
+        players: &LobbyPlayers,
+        broadcaster: &LobbyBroadcaster,
+    ) -> Result<(), StartMatchError> {
+        if self.current_match.is_some() {
+            return Err(StartMatchError::AlreadyOngoingMatch);
+        }
+        if players.len() < 3 {
+            return Err(StartMatchError::TooFewPlayers);
+        }
+        let current_match = MatchState::new(players, self.settings.n_cards_per_player)
+            .map_err(|_| StartMatchError::TooHighNCardsPerPlayer)?;
+        broadcaster.broadcast(ServerMessage::MatchStarted(current_match.info()));
+        self.current_match = Some(current_match);
+        Ok(())
     }
 }
 

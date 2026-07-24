@@ -31,13 +31,28 @@ pub struct RuleEffect {
     pub duration: RuleEffectDuration,
 }
 
+impl std::fmt::Debug for Criteria {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuleEffect")
+            .field("description", &self.description)
+            .finish()
+    }
+}
+impl std::fmt::Debug for RuleEffect {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuleEffect")
+            .field("duration", &self.duration)
+            .finish()
+    }
+}
+
 impl RuleEffect {
     pub fn new(handler: RuleEffectFn, duration: RuleEffectDuration) -> Self {
         Self { handler, duration }
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub enum RuleEffectDuration {
     RestOfRound,
     NTimes(usize),
@@ -58,6 +73,7 @@ impl RuleEffectDuration {
     }
 }
 
+#[derive(Debug)]
 pub struct Rule {
     description: Description,
     effect: RuleEffect,
@@ -71,7 +87,7 @@ pub struct RuleInfo {
 }
 
 // potential future support of multiple languages
-#[derive(Clone, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Description {
     english: String,
 }
@@ -84,6 +100,7 @@ impl Description {
     }
 }
 
+#[derive(Debug)]
 pub struct RuleManager {
     game_rules: BTreeMap<usize, (Criteria, Rule)>,
     next_game_rule_id: usize,
