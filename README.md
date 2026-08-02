@@ -4,9 +4,13 @@
 A (blazingly fast) crazytime server written in rust
 
 ### TODO
+- fix so default rules cannot be removed server side
 - match cancel by host
 - better error handling
 - more bug hunting and actual user testing
+
+- Determine incorrect i won to be either error or instant round termination, and what if a player is supposed to do i won and does something wrong and then i won
+  correctly, the run should still terminate with error even if they made a correct i won within the error reaction time
 
 ### Missing features
 - Lobby game spectating

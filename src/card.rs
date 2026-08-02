@@ -126,6 +126,10 @@ impl CardPool {
             },
             Card {
                 clock: ClockType::Yellow,
+                time: Time::Four,
+            },
+            Card {
+                clock: ClockType::Yellow,
                 time: Time::Five,
             },
             Card {
@@ -144,6 +148,10 @@ impl CardPool {
             Card {
                 clock: ClockType::Purple,
                 time: Time::Two,
+            },
+            Card {
+                clock: ClockType::Purple,
+                time: Time::Three,
             },
             Card {
                 clock: ClockType::Purple,

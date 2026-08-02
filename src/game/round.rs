@@ -194,6 +194,9 @@ impl TurnManager {
     pub fn set_next_player(&mut self, player: PlayerId) {
         self.next_player = Some(HashSet::from([player]));
     }
+    pub fn set_next_players(&mut self, players: HashSet<PlayerId>) {
+        self.next_player = Some(players);
+    }
 
     pub fn get_expected_players(
         &self,
@@ -208,7 +211,8 @@ impl TurnManager {
             HashSet::from([*match_players
                 .get(
                     (previous_player_idx as isize + self.direction.0)
-                        .rem_euclid(match_players.len() as isize) as usize,
+                        .rem_euclid(match_players.n_players() as isize)
+                        as usize,
                 )
                 .unwrap()])
         } else {

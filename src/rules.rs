@@ -878,17 +878,27 @@ impl RuleManager {
                              move_manager,
                          },
                          game_ctx| {
-                            let Some((highest_time_player, _)) = game_ctx
+                            let Some((highest_time_players, _)) = game_ctx
                                 .revealed_card_stacks
                                 .iter()
                                 .flat_map(|(player, stack)| stack.last().map(|card| (player, card)))
                                 .fold(None, |acc, candidate| {
-                                    if acc.is_some_and(|(_player, best_time)| {
-                                        best_time >= candidate.1.time
-                                    }) {
+                                    if acc
+                                        .as_ref()
+                                        .is_some_and(|(_, best_time)| candidate.1.time > *best_time)
+                                        || acc.is_none()
+                                    {
+                                        Some((HashSet::from([*candidate.0]), candidate.1.time))
+                                    } else if acc
+                                        .as_ref()
+                                        .is_some_and(|(_, best_time)| candidate.1.time < *best_time)
+                                    {
                                         acc
                                     } else {
-                                        Some((candidate.0, candidate.1.time))
+                                        acc.map(|(mut players, best_time)| {
+                                            players.insert(*candidate.0);
+                                            (players, best_time)
+                                        })
                                     }
                                 })
                             else {
@@ -898,7 +908,7 @@ impl RuleManager {
                                     move_manager,
                                 };
                             };
-                            turn_manager.set_next_player(*highest_time_player);
+                            turn_manager.set_next_players(highest_time_players);
                             ActionChain::Moves {
                                 previous_moves,
                                 turn_manager,
@@ -1099,6 +1109,10 @@ impl RuleManager {
     ///
     /// will reinsert the criteria and rule to the pool
     pub fn remove_rule(&mut self, id: &usize) -> bool {
+        // dont allow removing default rules
+        if *id <= 1 {
+            return false;
+        }
         if let Some((criteria, rule)) = self.game_rules.remove(id) {
             self.criteria_pool.insert(0, criteria);
             self.rule_pool.insert(0, rule);

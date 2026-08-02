@@ -429,7 +429,7 @@ impl GameState {
         if let Some(ref mut current_match) = self.current_match
             && let Some(card_pile) = current_match.players.remove_player(player)
         {
-            if current_match.players.len() < 3 {
+            if current_match.players.n_players() < 3 {
                 current_match.match_termination = Some(MatchTerminationType::MatchCancelled);
                 self.previous_matches
                     .push(self.current_match.take().unwrap());

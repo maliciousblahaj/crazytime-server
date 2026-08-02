@@ -15,6 +15,7 @@ use tokio::{
     sync::mpsc::{self, UnboundedSender},
     time::{Instant, Sleep, sleep},
 };
+use tower_http::cors::CorsLayer;
 
 #[derive(Clone)]
 struct AppState {
@@ -40,6 +41,7 @@ async fn main() -> color_eyre::Result<()> {
     let app = Router::new()
         .route("/", get(ws_endpoint))
         .route("/generate_token", get(generate_token_endpoint))
+        .layer(CorsLayer::permissive())
         .with_state(state);
 
     let port: u16 = std::env::var("CRAZYTIME_PORT")
