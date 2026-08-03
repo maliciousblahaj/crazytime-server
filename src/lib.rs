@@ -91,6 +91,7 @@ pub enum ServerMessage {
 #[derive(Clone, Serialize)]
 pub enum ErrorMessage {
     InvalidClientMessage,
+    SessionAlreadyConnected,
 
     NotInLobby,
     NotInGame,

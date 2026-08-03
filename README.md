@@ -11,6 +11,7 @@ A (blazingly fast) crazytime server written in rust
 
 - Determine incorrect i won to be either error or instant round termination, and what if a player is supposed to do i won and does something wrong and then i won
   correctly, the run should still terminate with error even if they made a correct i won within the error reaction time
+- (maybe migrate from chrono to jiff)
 
 ### Missing features
 - Lobby game spectating

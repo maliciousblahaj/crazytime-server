@@ -43,6 +43,12 @@ pub async fn lobby_coordinator_task(
             Some(message) = lobby_coordinator_rx.recv() => {
                 match message {
                     LobbyCoordinatorMessage::SessionConnected { session_id, connection_tx } => {
+                        if active_sessions.contains_key(&session_id) {
+                            connection_tx.send(ServerMessage::Error(ErrorMessage::SessionAlreadyConnected))
+                                .inspect_err(|e| tracing::error!(error = %e)).ok();
+
+                            continue 'runtime;
+                        }
                         active_sessions.insert(session_id, connection_tx.clone());
                         if let Some(lobby_code) = session_lobby_map.get(&session_id) {
                             lobby_senders.get(lobby_code).unwrap().send(InternalLobbyMessage::SessionConnected { session_id, connection_tx })

@@ -155,9 +155,13 @@ async fn ws_endpoint(
                 server_message = connection_rx.recv() => {
                     match server_message {
                         Some(message) => {
-                            let json = serde_json::to_string(&ServerPacket { sequence_id: sequential_message_id, message }).unwrap();
+                            let json = serde_json::to_string(&ServerPacket { sequence_id: sequential_message_id, message: &message }).unwrap();
                             sequential_message_id += 1; // to detect lost packages
                             socket.send(ws::Message::Text(json.into())).await.inspect_err(|e| tracing::error!(error = %e)).ok();
+
+                            if let ServerMessage::Error(ErrorMessage::SessionAlreadyConnected) = message {
+                                break 'ws_runtime;
+                            }
                         }
                         None => {
                             panic!("impossible!");
@@ -170,7 +174,7 @@ async fn ws_endpoint(
 }
 
 #[derive(Serialize)]
-pub struct ServerPacket {
+pub struct ServerPacket<'a> {
     sequence_id: usize,
-    message: ServerMessage,
+    message: &'a ServerMessage,
 }
